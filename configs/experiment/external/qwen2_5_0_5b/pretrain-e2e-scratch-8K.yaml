@@ -5,9 +5,7 @@ defaults:
   - _self_
 
 training:
-  exp_name: adapt-qwen05-e2e-8K-from-import
-  load_part: params
-  resume_exp_name: adapt-qwen05-swa-8K-from-import
+  exp_name: pretrain-qwen05-e2e-scratch-8K
   train_mode: meta
   spec_inner: ["language_model.**.suffix_blocks.feed_forward_prime.**"]
   ilr_init: 0.1
@@ -15,10 +13,8 @@ training:
     optimizer_type: sgd
     lr: 1
     clip_gradient: 1.0
-  init_source: external_hf
-  external_model_id: Qwen/Qwen2.5-0.5B
-  external_profile_path: ./artifacts/external_models/qwen2_5_0_5b/model_profile.json
-  adapter_recipe: ttt_bridge
+  init_source: scratch
+  adapter_recipe: ttt_scratch
 
 model:
   seq_modeling_block: SWA

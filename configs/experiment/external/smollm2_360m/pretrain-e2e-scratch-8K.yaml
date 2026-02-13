@@ -1,13 +1,11 @@
 # @package _global_
 defaults:
-  - override /training: qwen2_5_0_5b/pretrain-8K
-  - override /model: qwen2_5_0_5b
+  - override /training: smollm2_360m/pretrain-8K
+  - override /model: smollm2_360m
   - _self_
 
 training:
-  exp_name: adapt-qwen05-e2e-8K-from-import
-  load_part: params
-  resume_exp_name: adapt-qwen05-swa-8K-from-import
+  exp_name: pretrain-smol360-e2e-scratch-8K
   train_mode: meta
   spec_inner: ["language_model.**.suffix_blocks.feed_forward_prime.**"]
   ilr_init: 0.1
@@ -15,10 +13,8 @@ training:
     optimizer_type: sgd
     lr: 1
     clip_gradient: 1.0
-  init_source: external_hf
-  external_model_id: Qwen/Qwen2.5-0.5B
-  external_profile_path: ./artifacts/external_models/qwen2_5_0_5b/model_profile.json
-  adapter_recipe: ttt_bridge
+  init_source: scratch
+  adapter_recipe: ttt_scratch
 
 model:
   seq_modeling_block: SWA
@@ -26,9 +22,9 @@ model:
   unroll_block_scan: True
   mini_batch_size: 1024
   sliding_window_size: 8192
-  rope_theta: 1000000
+  rope_theta: 100000
   prime: True
   suffix_len: 6
   feed_forward_prime: swiglu
-  intermediate_size: 3952
+  intermediate_size: 2080
   attention_pattern: ttt_swa
