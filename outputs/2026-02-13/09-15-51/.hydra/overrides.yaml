@@ -1,0 +1,17 @@
+- +deploy=interactive
+- +experiment=external/qwen2_5_0_5b/pretrain-fa-scratch-8K
+- training.exp_folder=external_e2e_smoke
+- training.exp_dir=/private/tmp/external_phase1_e2e/experiments
+- training.checkpoint_path=/private/tmp/external_phase1_e2e/checkpoints
+- training.total_steps=1
+- training.save_milestone_freq=2
+- training.runtime_mode=token_stats
+- training.wandb_entity=phase1
+- training.wandb_project=phase1
+- training.wandb_key=none
+- deploy_paths.data.dclm_filter_8k=/private/tmp/external_phase1_e2e/token_data
+- deploy_paths.data.books3=/private/tmp/external_phase1_e2e/token_data
+- deploy_paths.checkpoint=/private/tmp/external_phase1_e2e/checkpoints
+- training.global_batch_size=2
+- training.seq_length=32
+- training.dummy_dataset=true

@@ -1,0 +1,17 @@
+- +deploy=interactive
+- +experiment=external/qwen2_5_0_5b/adapt-swa-8K-from-import
+- training.exp_folder=external_qwen_adapter_smoke
+- training.exp_dir=/private/tmp/external_phase1_real
+- training.checkpoint_path=/private/tmp/external_ckpt_real
+- training.total_steps=1
+- training.save_milestone_freq=1
+- training.runtime_mode=token_stats
+- training.wandb_entity=phase1
+- training.wandb_project=phase1
+- training.wandb_key=none
+- deploy_paths.data.dclm_filter_8k=/private/tmp/phase1_token_data
+- deploy_paths.data.books3=/private/tmp/phase1_token_data
+- deploy_paths.checkpoint=/private/tmp/external_ckpt_real
+- training.global_batch_size=2
+- training.seq_length=64
+- training.external_profile_path=/private/tmp/external_profiles_test/qwen2_5_0_5b/model_profile.json

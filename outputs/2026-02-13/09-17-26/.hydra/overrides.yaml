@@ -1,0 +1,15 @@
+- +deploy=interactive
+- +experiment=external/smollm2_360m/pretrain-fa-import-8K
+- training.runtime_mode=simulate
+- training.dummy_dataset=true
+- training.total_steps=1
+- training.save_milestone_freq=1
+- training.exp_folder=external_smoke2
+- training.exp_dir=/tmp/ext_smoke2/experiments
+- training.checkpoint_path=/tmp/ext_smoke2/checkpoints
+- deploy_paths.checkpoint=/tmp/ext_smoke2/checkpoints
+- deploy_paths.data.dclm_filter_8k=/tmp/phase1_token_data
+- deploy_paths.data.books3=/tmp/phase1_token_data
+- training.wandb_entity=phase1
+- training.wandb_project=phase1
+- training.wandb_key=none
