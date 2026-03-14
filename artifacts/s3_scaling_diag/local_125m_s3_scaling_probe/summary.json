@@ -1,0 +1,28 @@
+{
+  "classification": "dry_run",
+  "repo_root": "/Users/lumontoya/omscs/cs8903/Reproducing-TTT-E2E",
+  "rows": [
+    {
+      "n_data_parallel": 8,
+      "n_state_parallel": 1,
+      "reason": "only 1 visible devices available",
+      "status": "skipped",
+      "topology": "dp8_sp1"
+    },
+    {
+      "n_data_parallel": 4,
+      "n_state_parallel": 2,
+      "reason": "only 1 visible devices available",
+      "status": "skipped",
+      "topology": "dp4_sp2"
+    },
+    {
+      "n_data_parallel": 2,
+      "n_state_parallel": 4,
+      "reason": "only 1 visible devices available",
+      "status": "skipped",
+      "topology": "dp2_sp4"
+    }
+  ],
+  "schema_version": "1.0"
+}
