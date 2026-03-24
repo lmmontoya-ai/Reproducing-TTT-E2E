@@ -25,6 +25,13 @@ require_env B2_ENDPOINT_URL
 require_env B2_BUCKET
 require_env B2_DATASET_PREFIX
 
+if [[ -d /root/.ssh ]]; then
+  chmod 700 /root/.ssh || true
+  if [[ -f /root/.ssh/authorized_keys ]]; then
+    chmod 600 /root/.ssh/authorized_keys || true
+  fi
+fi
+
 mkdir -p "$DATA_ROOT" "$CHECKPOINT_ROOT" "$ARTIFACT_ROOT"
 
 echo "[bootstrap] syncing author checkpoints from B2"
@@ -51,7 +58,7 @@ aws s3 sync \
   --only-show-errors
 
 echo "[bootstrap] fetching datasets from B2"
-python "$REPO_ROOT/scripts/28_fetch_b2_dataset.py" \
+python3 "$REPO_ROOT/scripts/28_fetch_b2_dataset.py" \
   --dest-root "$DATA_ROOT" \
   --datasets dclm_filter_8k,books3 \
   --splits train,val \
