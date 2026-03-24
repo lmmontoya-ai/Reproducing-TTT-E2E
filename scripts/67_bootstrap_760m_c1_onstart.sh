@@ -66,6 +66,8 @@ python3 "$REPO_ROOT/scripts/28_fetch_b2_dataset.py" \
   --force \
   --no-progress
 
+cd "$REPO_ROOT"
+
 echo "[bootstrap] syncing Python environment"
 uv sync
 
