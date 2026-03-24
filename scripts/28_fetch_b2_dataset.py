@@ -66,11 +66,18 @@ def _has_split(dataset_path: Path, split: str) -> bool:
     return (split_path / "c").is_dir()
 
 
+def _has_fingerprint(dataset_path: Path, split: str) -> bool:
+    return (dataset_path / f"{split}.fingerprint.json").exists()
+
+
 def _validate_local(dataset_root: Path, splits: list[str]) -> bool:
     ok = True
     for split in splits:
         if not _has_split(dataset_root, split):
             print(f"Missing split '{split}' under {dataset_root}")
+            ok = False
+        if not _has_fingerprint(dataset_root, split):
+            print(f"Missing fingerprint '{split}.fingerprint.json' under {dataset_root}")
             ok = False
     return ok
 
@@ -90,6 +97,13 @@ def _s3_split_uri(bucket: str, prefix: str, dataset_name: str, split: str) -> st
     if cleaned_prefix:
         return f"s3://{bucket}/{cleaned_prefix}/{dataset_name}/{split}"
     return f"s3://{bucket}/{dataset_name}/{split}"
+
+
+def _s3_dataset_root_uri(bucket: str, prefix: str, dataset_name: str) -> str:
+    cleaned_prefix = prefix.strip("/")
+    if cleaned_prefix:
+        return f"s3://{bucket}/{cleaned_prefix}/{dataset_name}"
+    return f"s3://{bucket}/{dataset_name}"
 
 
 def _human_bytes(num_bytes: int) -> str:
@@ -247,6 +261,38 @@ def _sync_split_from_b2(
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
 
+def _sync_fingerprint_sidecars(
+    *,
+    aws: str,
+    bucket: str,
+    prefix: str,
+    dataset_name: str,
+    splits: list[str],
+    dataset_root: Path,
+    endpoint_url: str,
+    region: str | None,
+    dry_run: bool,
+) -> None:
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    remote_root = _s3_dataset_root_uri(bucket, prefix, dataset_name)
+    for split in splits:
+        remote_uri = f"{remote_root}/{split}.fingerprint.json"
+        local_path = dataset_root / f"{split}.fingerprint.json"
+        cmd = [
+            aws,
+            "s3",
+            "cp",
+            remote_uri,
+            str(local_path),
+            "--endpoint-url",
+            endpoint_url,
+            "--only-show-errors",
+        ]
+        if region:
+            cmd += ["--region", region]
+        _run(cmd, dry_run=dry_run)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download mirrored TTT-E2E datasets from Backblaze B2 into the runtime dataset layout."
@@ -345,6 +391,18 @@ def main() -> int:
                 show_progress=not args.no_progress,
                 progress_label=f"{dataset_name}/{split}",
             )
+
+        _sync_fingerprint_sidecars(
+            aws=aws,
+            bucket=bucket,
+            prefix=prefix,
+            dataset_name=dataset_name,
+            splits=splits,
+            dataset_root=dataset_root,
+            endpoint_url=endpoint_url,
+            region=region,
+            dry_run=args.dry_run,
+        )
 
         if args.dry_run:
             print(f"Dry run: skipped local validation for {dataset_name}.")

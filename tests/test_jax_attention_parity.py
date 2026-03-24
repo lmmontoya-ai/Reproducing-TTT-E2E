@@ -141,6 +141,41 @@ class JaxAttentionParityTest(unittest.TestCase):
             },
         )
 
+    def test_swa_attention_implementation_can_be_forced_to_default(self) -> None:
+        import equinox as eqx
+        import jax.numpy as jnp
+        import jax.random as jrandom
+
+        from ttt.jax_runtime.model.attention import SWAFull
+
+        cfg = self._make_cfg(block="SWA")
+        model, state = eqx.nn.make_with_state(SWAFull)(cfg, key=jrandom.PRNGKey(0))
+        hidden_states = jnp.ones((4, cfg.hidden_size), dtype=jnp.float32)
+        seq = self._make_seq(4)
+
+        recorded: dict[str, object] = {}
+
+        def fake_attention(query, key, value, **kwargs):
+            recorded["kwargs"] = kwargs
+            return query
+
+        with (
+            mock.patch.dict(os.environ, {"TTT_ATTENTION_IMPLEMENTATION": "none"}, clear=False),
+            mock.patch("jax.default_backend", return_value="gpu"),
+            mock.patch("jax.lax.with_sharding_constraint", side_effect=lambda x, *_args, **_kwargs: x),
+            mock.patch("jax.nn.dot_product_attention", side_effect=fake_attention),
+        ):
+            _out, _state = model(hidden_states, seq, state, is_prefix=False)
+
+        self.assertEqual(
+            recorded["kwargs"],
+            {
+                "local_window_size": (cfg.sliding_window_size - 1, 0),
+                "is_causal": True,
+                "implementation": None,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

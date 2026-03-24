@@ -36,6 +36,14 @@ def _env_default(name: str, fallback: str) -> str:
     return value or fallback
 
 
+def _apply_attention_implementation_override(value: str | None) -> str | None:
+    override = str(value or "").strip().lower()
+    if not override:
+        return None
+    os.environ["TTT_ATTENTION_IMPLEMENTATION"] = override
+    return override
+
+
 def _run(cmd: list[str], *, dry_run: bool) -> int:
     print("$ " + " ".join(shlex.quote(part) for part in cmd), flush=True)
     if dry_run:
@@ -45,6 +53,63 @@ def _run(cmd: list[str], *, dry_run: bool) -> int:
 
 def _checkpoint_exists(checkpoint_root: Path, exp_folder: str, run_id: str) -> bool:
     return (checkpoint_root / exp_folder / run_id / "latest.json").exists()
+
+
+def _stage_checkpoint_root(checkpoint_root: Path, exp_folder: str, run_id: str) -> Path:
+    return checkpoint_root / exp_folder / run_id
+
+
+def _resolve_stage_resume_root(checkpoint_root: Path, exp_folder: str, run_id: str) -> Path | None:
+    root = _stage_checkpoint_root(checkpoint_root, exp_folder, run_id)
+    latest = root / "latest.json"
+    if latest.exists():
+        return root
+    return None
+
+
+def _resolve_resume_plan(
+    *,
+    stage_id: str,
+    run_id: str,
+    checkpoint_root: Path,
+    exp_folder: str,
+    artifact_root: Path,
+) -> dict[str, Any]:
+    stage_resume_root = _resolve_stage_resume_root(checkpoint_root, exp_folder, run_id)
+    if stage_resume_root is not None:
+        plan: dict[str, Any] = {
+            "resume_source": "stage_checkpoint",
+            "seed_source": "",
+            "explicit_resume_checkpoint_path": stage_resume_root,
+            "explicit_resume_checkpoint_format": "orbax",
+            "extra_overrides": ["backend.distributed=false", "training.load_part=all"],
+            "parent_refs_override": None,
+        }
+        if stage_id in AUTHOR_SEED_SOURCES_760M:
+            seed_source = AUTHOR_SEED_SOURCES_760M[stage_id]
+            plan["seed_source"] = seed_source
+            plan["parent_refs_override"] = [author_seed_checkpoint_ref(artifact_root, seed_source)]
+        return plan
+
+    if stage_id in AUTHOR_SEED_SOURCES_760M:
+        seed_source = AUTHOR_SEED_SOURCES_760M[stage_id]
+        return {
+            "resume_source": "author_seed",
+            "seed_source": seed_source,
+            "explicit_resume_checkpoint_path": artifact_root / seed_source,
+            "explicit_resume_checkpoint_format": "orbax",
+            "extra_overrides": ["backend.distributed=false", "training.load_part=params"],
+            "parent_refs_override": [author_seed_checkpoint_ref(artifact_root, seed_source)],
+        }
+
+    return {
+        "resume_source": "",
+        "seed_source": "",
+        "explicit_resume_checkpoint_path": None,
+        "explicit_resume_checkpoint_format": None,
+        "extra_overrides": ["backend.distributed=false"],
+        "parent_refs_override": None,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,6 +139,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-batches", type=int, default=8)
     parser.add_argument("--eval-batch-size", type=int, default=0)
     parser.add_argument(
+        "--attention-implementation",
+        choices=("auto", "default", "none", "cudnn", "xla"),
+        default="",
+        help="Optional TTT_ATTENTION_IMPLEMENTATION override forwarded to train/eval subprocesses.",
+    )
+    parser.add_argument(
         "--phase",
         choices=("core", "controls", "all"),
         default="core",
@@ -98,6 +169,7 @@ def main() -> int:
     args = parse_args()
     repo_root = args.repo_root.expanduser().resolve()
     load_env_file(repo_root / ".env")
+    attention_override = _apply_attention_implementation_override(args.attention_implementation)
 
     registry = load_registry(args.registry.expanduser().resolve())
     stage_map = registry.stage_map()
@@ -111,6 +183,7 @@ def main() -> int:
         revised_global_batch_size=args.revised_global_batch_size,
         save_milestone_freq=args.save_milestone_freq,
         seed=args.seed,
+        attention_implementation=attention_override,
     )
     protocol_out = (
         repo_root / "reports" / "paper" / args.paper_run_id / "launch" / "protocol_manifest.json"
@@ -168,22 +241,24 @@ def main() -> int:
                         "status": "skipped_existing",
                         "revised_global_batch_size": spec.revised_global_batch_size,
                         "revised_total_steps": spec.revised_total_steps,
+                        "attention_implementation": attention_override,
                     }
                 )
                 continue
 
-            parent_refs_override = None
-            explicit_resume_checkpoint_path = None
-            explicit_resume_checkpoint_format = None
-            extra_overrides = ["backend.distributed=false"]
-            seed_source = ""
-
-            if stage_id in AUTHOR_SEED_SOURCES_760M:
-                seed_source = AUTHOR_SEED_SOURCES_760M[stage_id]
-                parent_refs_override = [author_seed_checkpoint_ref(artifact_root, seed_source)]
-                explicit_resume_checkpoint_path = artifact_root / seed_source
-                explicit_resume_checkpoint_format = "orbax"
-                extra_overrides.append("training.load_part=params")
+            resume_plan = _resolve_resume_plan(
+                stage_id=stage_id,
+                run_id=run_id,
+                checkpoint_root=opts.checkpoint_root,
+                exp_folder=opts.exp_folder,
+                artifact_root=artifact_root,
+            )
+            parent_refs_override = resume_plan["parent_refs_override"]
+            explicit_resume_checkpoint_path = resume_plan["explicit_resume_checkpoint_path"]
+            explicit_resume_checkpoint_format = resume_plan["explicit_resume_checkpoint_format"]
+            extra_overrides = list(resume_plan["extra_overrides"])
+            seed_source = str(resume_plan["seed_source"])
+            resume_source = str(resume_plan["resume_source"])
 
             result = run_stage(
                 stage=stage,
@@ -202,6 +277,7 @@ def main() -> int:
                     "protocol_family": "760m_author_seed",
                     "paper_stage_label": PAPER_STAGE_LABELS_760M[stage_id],
                     "seed_source": seed_source or "stage_parent",
+                    "attention_implementation": attention_override or "default_runtime",
                 },
             )
             rows.append(
@@ -218,6 +294,8 @@ def main() -> int:
                     "revised_global_batch_size": spec.revised_global_batch_size,
                     "revised_total_steps": spec.revised_total_steps,
                     "seed_source": seed_source or "stage_parent",
+                    "resume_source": resume_source or "stage_parent",
+                    "attention_implementation": attention_override,
                 }
             )
             if str(result.status).startswith("failed"):
@@ -235,6 +313,7 @@ def main() -> int:
                 "paper_run_id": args.paper_run_id,
                 "phase": args.phase,
                 "protocol_manifest": str(protocol_out),
+                "attention_implementation": attention_override,
                 "rows": rows,
             },
         )
@@ -287,6 +366,7 @@ def main() -> int:
                     "paper_run_id": args.paper_run_id,
                     "phase": args.phase,
                     "protocol_manifest": str(protocol_out),
+                    "attention_implementation": attention_override,
                     "rows": rows,
                 },
             )
@@ -332,6 +412,7 @@ def main() -> int:
                         "paper_run_id": args.paper_run_id,
                         "phase": args.phase,
                         "protocol_manifest": str(protocol_out),
+                        "attention_implementation": attention_override,
                         "rows": rows,
                     },
                 )
@@ -367,6 +448,7 @@ def main() -> int:
                         "paper_run_id": args.paper_run_id,
                         "phase": args.phase,
                         "protocol_manifest": str(protocol_out),
+                        "attention_implementation": attention_override,
                         "rows": rows,
                     },
                 )
@@ -379,6 +461,7 @@ def main() -> int:
             "paper_run_id": args.paper_run_id,
             "phase": args.phase,
             "protocol_manifest": str(protocol_out),
+            "attention_implementation": attention_override,
             "rows": rows,
         },
     )

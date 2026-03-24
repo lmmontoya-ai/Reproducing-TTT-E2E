@@ -140,6 +140,7 @@ def build_protocol_r_760m_manifest(
     revised_global_batch_size: int = REVISED_8X_H200_GLOBAL_BATCH_SIZE,
     save_milestone_freq: int = 120,
     seed: int = 0,
+    attention_implementation: str | None = None,
 ) -> dict[str, Any]:
     stage_map = build_protocol_r_760m_stage_map(
         revised_global_batch_size=revised_global_batch_size,
@@ -163,6 +164,7 @@ def build_protocol_r_760m_manifest(
         "effective_adapt_steps": stage_map["S2_ADAPT"].revised_total_steps,
         "save_milestone_freq": save_milestone_freq,
         "seed": seed,
+        "attention_implementation": attention_implementation,
         "execution_tranches": {
             "core": list(CORE_760M_STAGE_IDS),
             "controls": list(CONTROL_760M_STAGE_IDS),

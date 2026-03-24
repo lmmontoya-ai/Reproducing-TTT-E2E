@@ -22,6 +22,8 @@ def _attention_implementation(*, use_flash: bool):
     override = os.environ.get("TTT_ATTENTION_IMPLEMENTATION", "").strip().lower()
     if override in {"xla", "cudnn"}:
         return override
+    if override in {"none", "default", "auto"}:
+        return None
     return "cudnn" if use_flash else None
 
 

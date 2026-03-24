@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,14 @@ STAGE_SOURCES: dict[str, str] = {
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _apply_attention_implementation_override(value: str | None) -> str | None:
+    override = str(value or "").strip().lower()
+    if not override:
+        return None
+    os.environ["TTT_ATTENTION_IMPLEMENTATION"] = override
+    return override
 
 
 def _checkpoint_written(checkpoint_root: Path, exp_folder: str, run_id: str) -> bool:
@@ -76,6 +85,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--allow-missing-fingerprints", action="store_true")
     parser.add_argument("--summary-out", type=Path, default=None)
+    parser.add_argument(
+        "--attention-implementation",
+        choices=("auto", "default", "none", "cudnn", "xla"),
+        default="",
+        help="Optional TTT_ATTENTION_IMPLEMENTATION override forwarded to train subprocesses.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -84,6 +99,7 @@ def main() -> int:
     args = parse_args()
     repo_root = args.repo_root.expanduser().resolve()
     load_env_file(repo_root / ".env")
+    attention_override = _apply_attention_implementation_override(args.attention_implementation)
 
     registry = load_registry(args.registry.expanduser().resolve())
     stage_map = registry.stage_map()
@@ -165,6 +181,7 @@ def main() -> int:
                 "last_metric_step": last_metrics.get("step") if last_metrics else None,
                 "last_metric_loss_ce": last_metrics.get("loss_ce") if last_metrics else None,
                 "parent_checkpoint": parent_ref.to_dict(),
+                "attention_implementation": attention_override,
             }
         )
 
@@ -174,6 +191,7 @@ def main() -> int:
         "paper_run_id": args.paper_run_id,
         "exp_folder": args.exp_folder,
         "steps": args.steps,
+        "attention_implementation": attention_override,
         "rows": rows,
     }
     if args.summary_out is None:
