@@ -5,6 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 import json
+import argparse
+import sys
+
+from ttt.research.orchestrator import OrchestratorOptions
 
 
 def _load_launcher_module():
@@ -14,6 +18,7 @@ def _load_launcher_module():
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load module from {script_path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -70,6 +75,47 @@ class LadderResumePlanTest(unittest.TestCase):
                 artifact_root / "760m_e2e",
             )
             self.assertIn("training.load_part=params", plan["extra_overrides"])
+
+    def test_build_b2_sync_command_passes_checkpoint_and_report_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            opts = OrchestratorOptions(
+                deploy="interactive",
+                runtime_mode="jax_train",
+                exp_dir=root / "experiments",
+                checkpoint_root=root / "checkpoints",
+                profile_root=root / "profiles",
+                dclm_root=root / "dclm",
+                books_root=root / "books",
+                exp_folder="protocol_r_760m_author_seed_v1",
+                wandb_entity="none",
+                wandb_project="none",
+                wandb_key="env",
+            )
+            args = argparse.Namespace(
+                paper_run_id="protocol_r_760m_author_seed_v1",
+                exp_folder="protocol_r_760m_author_seed_v1",
+                reports_root=root / "reports" / "paper",
+                b2_bucket="bucket",
+                b2_endpoint_url="https://example.invalid",
+                b2_region="us-east-005",
+                b2_prefix="ttt-e2e-artifacts",
+                run_log=["/tmp/c1.log"],
+            )
+
+            cmd = self.module._build_b2_sync_command(
+                args=args,
+                repo_root=root,
+                opts=opts,
+            )
+
+            self.assertEqual(cmd[0], self.module.sys.executable)
+            self.assertIn("70_sync_760m_b2.py", cmd[1])
+            self.assertIn("--checkpoint-root", cmd)
+            self.assertIn(str(opts.checkpoint_root), cmd)
+            self.assertIn("--reports-root", cmd)
+            self.assertIn(str((root / "reports" / "paper").resolve()), cmd)
+            self.assertIn("--run-log", cmd)
 
     def _materialize_author_seed(self, artifact_root: Path, key: str) -> None:
         seed_root = artifact_root / key

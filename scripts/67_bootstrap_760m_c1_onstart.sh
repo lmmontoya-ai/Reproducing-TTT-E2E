@@ -9,6 +9,12 @@ PAPER_RUN_ID="${PAPER_RUN_ID:-protocol_r_760m_author_seed_v1}"
 EXP_FOLDER="${EXP_FOLDER:-protocol_r_760m_author_seed_v1}"
 SAVE_MILESTONE_FREQ="${SAVE_MILESTONE_FREQ:-2400}"
 ATTN_IMPL="${ATTN_IMPL:-none}"
+B2_ARTIFACT_PREFIX="${B2_ARTIFACT_PREFIX:-ttt-e2e-artifacts}"
+SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS:-600}"
+GATE_LOG="${GATE_LOG:-/workspace/c1_gate.log}"
+RUN_LOG="${RUN_LOG:-/workspace/c1_ladder.log}"
+SYNC_LOG="${SYNC_LOG:-/workspace/c1_b2_sync.log}"
+SYNC_PID=""
 
 require_env() {
   local name="$1"
@@ -33,6 +39,48 @@ if [[ -d /root/.ssh ]]; then
 fi
 
 mkdir -p "$DATA_ROOT" "$CHECKPOINT_ROOT" "$ARTIFACT_ROOT"
+
+sync_to_b2_once() {
+  python3 "$REPO_ROOT/scripts/70_sync_760m_b2.py" \
+    --paper-run-id "$PAPER_RUN_ID" \
+    --exp-folder "$EXP_FOLDER" \
+    --checkpoint-root "$CHECKPOINT_ROOT" \
+    --exp-dir "$REPO_ROOT/experiments" \
+    --reports-root "$REPO_ROOT/reports/paper" \
+    --b2-bucket "$B2_BUCKET" \
+    --endpoint-url "$B2_ENDPOINT_URL" \
+    --region "$AWS_DEFAULT_REGION" \
+    --b2-prefix "$B2_ARTIFACT_PREFIX" \
+    --run-log "$GATE_LOG" \
+    --run-log "$RUN_LOG" \
+    --run-log "$SYNC_LOG"
+}
+
+start_sync_loop() {
+  (
+    while true; do
+      {
+        echo "[sync] $(date -u '+%Y-%m-%d %H:%M:%S UTC') starting B2 sync"
+        sync_to_b2_once
+        echo "[sync] $(date -u '+%Y-%m-%d %H:%M:%S UTC') finished B2 sync"
+      } >>"$SYNC_LOG" 2>&1 || {
+        rc=$?
+        echo "[sync] $(date -u '+%Y-%m-%d %H:%M:%S UTC') B2 sync failed rc=$rc" >>"$SYNC_LOG"
+      }
+      sleep "$SYNC_INTERVAL_SECONDS"
+    done
+  ) &
+  SYNC_PID="$!"
+}
+
+stop_sync_loop() {
+  if [[ -n "$SYNC_PID" ]] && kill -0 "$SYNC_PID" 2>/dev/null; then
+    kill "$SYNC_PID" 2>/dev/null || true
+    wait "$SYNC_PID" 2>/dev/null || true
+  fi
+}
+
+trap stop_sync_loop EXIT
 
 echo "[bootstrap] syncing author checkpoints from B2"
 aws s3 sync \
@@ -73,12 +121,11 @@ uv sync
 
 export PATH="$HOME/.local/bin:$PATH"
 export TTT_ATTENTION_IMPLEMENTATION="$ATTN_IMPL"
-
-GATE_LOG="/workspace/c1_gate.log"
-RUN_LOG="/workspace/c1_ladder.log"
+start_sync_loop
 
 echo "[bootstrap] running 5-step resume gate" | tee "$GATE_LOG"
-uv run --exact train \
+gate_rc=0
+if ! uv run --exact train \
   +deploy=interactive \
   +experiment=760m/pretrained/adapt-760m-e2e-8K-from-fa \
   training.exp_folder="$EXP_FOLDER" \
@@ -102,10 +149,22 @@ uv run --exact train \
   training.resume_checkpoint_path="$CHECKPOINT_ROOT/$EXP_FOLDER/adapt-760m-e2e-8K-from-fa" \
   training.resume_checkpoint_format=orbax \
   backend.distributed=false \
-  training.load_part=all 2>&1 | tee -a "$GATE_LOG"
+  training.load_part=all 2>&1 | tee -a "$GATE_LOG"; then
+  gate_rc=$?
+fi
+
+{
+  echo "[bootstrap] running post-gate B2 sync"
+  sync_to_b2_once
+} >>"$SYNC_LOG" 2>&1 || true
+
+if [[ "$gate_rc" -ne 0 ]]; then
+  exit "$gate_rc"
+fi
 
 echo "[bootstrap] gate passed, launching full C1 ladder" | tee "$RUN_LOG"
-uv run --exact python "$REPO_ROOT/scripts/66_run_760m_author_seed_ladder.py" \
+ladder_rc=0
+if ! uv run --exact python "$REPO_ROOT/scripts/66_run_760m_author_seed_ladder.py" \
   --phase core \
   --dclm-root "$DATA_ROOT/dclm_filter_8k" \
   --books-root "$DATA_ROOT/books3" \
@@ -113,4 +172,21 @@ uv run --exact python "$REPO_ROOT/scripts/66_run_760m_author_seed_ladder.py" \
   --save-milestone-freq "$SAVE_MILESTONE_FREQ" \
   --wandb-project none \
   --wandb-entity none \
-  --allow-missing-fingerprints 2>&1 | tee -a "$RUN_LOG"
+  --allow-missing-fingerprints \
+  --b2-sync \
+  --b2-bucket "$B2_BUCKET" \
+  --b2-endpoint-url "$B2_ENDPOINT_URL" \
+  --b2-region "$AWS_DEFAULT_REGION" \
+  --b2-prefix "$B2_ARTIFACT_PREFIX" \
+  --run-log "$GATE_LOG" \
+  --run-log "$RUN_LOG" \
+  --run-log "$SYNC_LOG" 2>&1 | tee -a "$RUN_LOG"; then
+  ladder_rc=$?
+fi
+
+{
+  echo "[bootstrap] running final B2 sync"
+  sync_to_b2_once
+} >>"$SYNC_LOG" 2>&1 || true
+
+exit "$ladder_rc"

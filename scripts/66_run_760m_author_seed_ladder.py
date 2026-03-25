@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,54 @@ def _run(cmd: list[str], *, dry_run: bool) -> int:
     if dry_run:
         return 0
     return subprocess.run(cmd, check=False).returncode
+
+
+def _build_b2_sync_command(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    opts: OrchestratorOptions,
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        str((repo_root / "scripts" / "70_sync_760m_b2.py").resolve()),
+        "--paper-run-id",
+        args.paper_run_id,
+        "--exp-folder",
+        args.exp_folder,
+        "--checkpoint-root",
+        str(opts.checkpoint_root),
+        "--exp-dir",
+        str(opts.exp_dir),
+        "--reports-root",
+        str(args.reports_root.expanduser().resolve()),
+    ]
+    if args.b2_bucket:
+        cmd.extend(["--b2-bucket", args.b2_bucket])
+    if args.b2_endpoint_url:
+        cmd.extend(["--endpoint-url", args.b2_endpoint_url])
+    if args.b2_region:
+        cmd.extend(["--region", args.b2_region])
+    if args.b2_prefix:
+        cmd.extend(["--b2-prefix", args.b2_prefix])
+    for log_path in args.run_log:
+        cmd.extend(["--run-log", log_path])
+    return cmd
+
+
+def _maybe_sync_b2(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    opts: OrchestratorOptions,
+    rows: list[dict[str, Any]],
+    step_id: str,
+) -> None:
+    if not args.b2_sync:
+        return
+    cmd = _build_b2_sync_command(args=args, repo_root=repo_root, opts=opts)
+    rc = _run(cmd, dry_run=args.dry_run)
+    rows.append({"step_id": step_id, "command": cmd, "returncode": rc})
 
 
 def _checkpoint_exists(checkpoint_root: Path, exp_folder: str, run_id: str) -> bool:
@@ -128,6 +177,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exp-dir", type=Path, default=Path("./experiments"))
     parser.add_argument("--checkpoint-root", type=Path, default=Path("./checkpoints"))
     parser.add_argument("--profile-root", type=Path, default=Path("./artifacts/external_models"))
+    parser.add_argument("--reports-root", type=Path, default=Path("./reports/paper"))
     parser.add_argument("--dclm-root", type=Path, required=True)
     parser.add_argument("--books-root", type=Path, required=True)
     parser.add_argument("--revised-global-batch-size", type=int, default=8)
@@ -160,6 +210,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--skip-tables", action="store_true")
     parser.add_argument("--skip-figures", action="store_true")
+    parser.add_argument("--b2-sync", action="store_true")
+    parser.add_argument("--b2-bucket", default=_env_default("B2_BUCKET", ""))
+    parser.add_argument("--b2-endpoint-url", default=_env_default("B2_ENDPOINT_URL", ""))
+    parser.add_argument("--b2-region", default=_env_default("AWS_DEFAULT_REGION", "us-east-005"))
+    parser.add_argument("--b2-prefix", default="ttt-e2e-artifacts")
+    parser.add_argument("--run-log", action="append", default=[])
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -298,6 +354,14 @@ def main() -> int:
                     "attention_implementation": attention_override,
                 }
             )
+            if str(result.status) == "succeeded":
+                _maybe_sync_b2(
+                    args=args,
+                    repo_root=repo_root,
+                    opts=opts,
+                    rows=rows,
+                    step_id=f"sync_b2:stage:{stage_id}",
+                )
             if str(result.status).startswith("failed"):
                 train_failed = True
                 break
@@ -358,6 +422,14 @@ def main() -> int:
             cmd_eval.append("--dry-run")
         rc = _run(cmd_eval, dry_run=args.dry_run)
         rows.append({"step_id": "eval:books32k", "command": cmd_eval, "returncode": rc})
+        if rc == 0:
+            _maybe_sync_b2(
+                args=args,
+                repo_root=repo_root,
+                opts=opts,
+                rows=rows,
+                step_id="sync_b2:eval",
+            )
         if rc != 0:
             _write_json(
                 summary_out,
@@ -404,6 +476,14 @@ def main() -> int:
             ]
             rc = _run(cmd_tables, dry_run=args.dry_run)
             rows.append({"step_id": "tables", "command": cmd_tables, "returncode": rc})
+            if rc == 0:
+                _maybe_sync_b2(
+                    args=args,
+                    repo_root=repo_root,
+                    opts=opts,
+                    rows=rows,
+                    step_id="sync_b2:tables",
+                )
             if rc != 0:
                 _write_json(
                     summary_out,
@@ -440,6 +520,14 @@ def main() -> int:
             ]
             rc = _run(cmd_figures, dry_run=args.dry_run)
             rows.append({"step_id": "figures", "command": cmd_figures, "returncode": rc})
+            if rc == 0:
+                _maybe_sync_b2(
+                    args=args,
+                    repo_root=repo_root,
+                    opts=opts,
+                    rows=rows,
+                    step_id="sync_b2:figures",
+                )
             if rc != 0:
                 _write_json(
                     summary_out,
@@ -453,6 +541,14 @@ def main() -> int:
                     },
                 )
                 return rc
+
+    _maybe_sync_b2(
+        args=args,
+        repo_root=repo_root,
+        opts=opts,
+        rows=rows,
+        step_id="sync_b2:final",
+    )
 
     _write_json(
         summary_out,
