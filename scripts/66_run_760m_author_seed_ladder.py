@@ -20,6 +20,9 @@ from ttt.research.protocol_760m import (
     PAPER_STAGE_LABELS_760M,
     PROTOCOL_R_760M_EXP_FOLDER,
     PROTOCOL_R_760M_PAPER_RUN_ID,
+    REVISED_8X_H200_EXT_GLOBAL_BATCH_SIZE,
+    REVISED_8X_H200_EXT_STATE_PARALLEL,
+    REVISED_8X_H200_ADAPT_STATE_PARALLEL,
     build_protocol_r_760m_manifest,
     build_protocol_r_760m_stage_map,
 )
@@ -29,7 +32,9 @@ from ttt.research.types import BudgetSpec
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _env_default(name: str, fallback: str) -> str:
@@ -37,12 +42,17 @@ def _env_default(name: str, fallback: str) -> str:
     return value or fallback
 
 
-def _apply_attention_implementation_override(value: str | None) -> str | None:
-    override = str(value or "").strip().lower()
-    if not override:
-        return None
-    os.environ["TTT_ATTENTION_IMPLEMENTATION"] = override
-    return override
+def _apply_attention_overrides(
+    attention_implementation: str | None,
+    swa_prefix_attention_implementation: str | None,
+) -> tuple[str | None, str | None]:
+    global_override = str(attention_implementation or "").strip().lower()
+    prefix_override = str(swa_prefix_attention_implementation or "").strip().lower()
+    if global_override:
+        os.environ["TTT_ATTENTION_IMPLEMENTATION"] = global_override
+    if prefix_override:
+        os.environ["TTT_SWA_PREFIX_ATTENTION_IMPLEMENTATION"] = prefix_override
+    return (global_override or None, prefix_override or None)
 
 
 def _run(cmd: list[str], *, dry_run: bool) -> int:
@@ -108,7 +118,9 @@ def _stage_checkpoint_root(checkpoint_root: Path, exp_folder: str, run_id: str) 
     return checkpoint_root / exp_folder / run_id
 
 
-def _resolve_stage_resume_root(checkpoint_root: Path, exp_folder: str, run_id: str) -> Path | None:
+def _resolve_stage_resume_root(
+    checkpoint_root: Path, exp_folder: str, run_id: str
+) -> Path | None:
     root = _stage_checkpoint_root(checkpoint_root, exp_folder, run_id)
     latest = root / "latest.json"
     if latest.exists():
@@ -137,7 +149,9 @@ def _resolve_resume_plan(
         if stage_id in AUTHOR_SEED_SOURCES_760M:
             seed_source = AUTHOR_SEED_SOURCES_760M[stage_id]
             plan["seed_source"] = seed_source
-            plan["parent_refs_override"] = [author_seed_checkpoint_ref(artifact_root, seed_source)]
+            plan["parent_refs_override"] = [
+                author_seed_checkpoint_ref(artifact_root, seed_source)
+            ]
         return plan
 
     if stage_id in AUTHOR_SEED_SOURCES_760M:
@@ -147,8 +161,13 @@ def _resolve_resume_plan(
             "seed_source": seed_source,
             "explicit_resume_checkpoint_path": artifact_root / seed_source,
             "explicit_resume_checkpoint_format": "orbax",
-            "extra_overrides": ["backend.distributed=false", "training.load_part=params"],
-            "parent_refs_override": [author_seed_checkpoint_ref(artifact_root, seed_source)],
+            "extra_overrides": [
+                "backend.distributed=false",
+                "training.load_part=params",
+            ],
+            "parent_refs_override": [
+                author_seed_checkpoint_ref(artifact_root, seed_source)
+            ],
         }
 
     return {
@@ -165,26 +184,54 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run the revised 760M author-seeded ladder on the local runtime. "
-            "This launcher freezes the 8x H200 Protocol R-style batch reduction "
-            "at global_batch_size=8 and scales stage steps to preserve token budget."
+            "This launcher freezes the hardware-feasible 8x H200 Protocol R surface: "
+            "the 8K bridge at gb=8/state_parallel=1, and the 32K stages at "
+            "gb=4/state_parallel=2, with steps scaled to preserve token budget."
         )
     )
-    parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--registry", type=Path, default=Path("./configs/research/warmstart_registry.yaml"))
-    parser.add_argument("--artifact-root", type=Path, default=Path("./artifacts/author_checkpoints"))
+    parser.add_argument(
+        "--repo-root", type=Path, default=Path(__file__).resolve().parents[1]
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        default=Path("./configs/research/warmstart_registry.yaml"),
+    )
+    parser.add_argument(
+        "--artifact-root", type=Path, default=Path("./artifacts/author_checkpoints")
+    )
     parser.add_argument("--paper-run-id", default=PROTOCOL_R_760M_PAPER_RUN_ID)
     parser.add_argument("--exp-folder", default=PROTOCOL_R_760M_EXP_FOLDER)
     parser.add_argument("--exp-dir", type=Path, default=Path("./experiments"))
     parser.add_argument("--checkpoint-root", type=Path, default=Path("./checkpoints"))
-    parser.add_argument("--profile-root", type=Path, default=Path("./artifacts/external_models"))
+    parser.add_argument(
+        "--profile-root", type=Path, default=Path("./artifacts/external_models")
+    )
     parser.add_argument("--reports-root", type=Path, default=Path("./reports/paper"))
     parser.add_argument("--dclm-root", type=Path, required=True)
     parser.add_argument("--books-root", type=Path, required=True)
     parser.add_argument("--revised-global-batch-size", type=int, default=8)
+    parser.add_argument(
+        "--revised-ext-global-batch-size",
+        type=int,
+        default=REVISED_8X_H200_EXT_GLOBAL_BATCH_SIZE,
+    )
+    parser.add_argument(
+        "--revised-adapt-state-parallel",
+        type=int,
+        default=REVISED_8X_H200_ADAPT_STATE_PARALLEL,
+    )
+    parser.add_argument(
+        "--revised-ext-state-parallel",
+        type=int,
+        default=REVISED_8X_H200_EXT_STATE_PARALLEL,
+    )
     parser.add_argument("--save-milestone-freq", type=int, default=120)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--wandb-entity", default=_env_default("WANDB_ENTITY", "none"))
-    parser.add_argument("--wandb-project", default=_env_default("WANDB_PROJECT", "none"))
+    parser.add_argument(
+        "--wandb-project", default=_env_default("WANDB_PROJECT", "none")
+    )
     parser.add_argument("--wandb-key", default="env")
     parser.add_argument("--eval-batches", type=int, default=8)
     parser.add_argument("--eval-batch-size", type=int, default=0)
@@ -193,6 +240,15 @@ def parse_args() -> argparse.Namespace:
         choices=("auto", "default", "none", "cudnn", "xla"),
         default="",
         help="Optional TTT_ATTENTION_IMPLEMENTATION override forwarded to train/eval subprocesses.",
+    )
+    parser.add_argument(
+        "--swa-prefix-attention-implementation",
+        choices=("auto", "default", "none", "cudnn", "xla"),
+        default="",
+        help=(
+            "Optional TTT_SWA_PREFIX_ATTENTION_IMPLEMENTATION override for the SWA "
+            "prefix/full-window attention path only."
+        ),
     )
     parser.add_argument(
         "--phase",
@@ -212,8 +268,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-figures", action="store_true")
     parser.add_argument("--b2-sync", action="store_true")
     parser.add_argument("--b2-bucket", default=_env_default("B2_BUCKET", ""))
-    parser.add_argument("--b2-endpoint-url", default=_env_default("B2_ENDPOINT_URL", ""))
-    parser.add_argument("--b2-region", default=_env_default("AWS_DEFAULT_REGION", "us-east-005"))
+    parser.add_argument(
+        "--b2-endpoint-url", default=_env_default("B2_ENDPOINT_URL", "")
+    )
+    parser.add_argument(
+        "--b2-region", default=_env_default("AWS_DEFAULT_REGION", "us-east-005")
+    )
     parser.add_argument("--b2-prefix", default="ttt-e2e-artifacts")
     parser.add_argument("--run-log", action="append", default=[])
     parser.add_argument("--strict", action="store_true")
@@ -225,24 +285,38 @@ def main() -> int:
     args = parse_args()
     repo_root = args.repo_root.expanduser().resolve()
     load_env_file(repo_root / ".env")
-    attention_override = _apply_attention_implementation_override(args.attention_implementation)
+    attention_override, prefix_attention_override = _apply_attention_overrides(
+        args.attention_implementation,
+        args.swa_prefix_attention_implementation,
+    )
 
     registry = load_registry(args.registry.expanduser().resolve())
     stage_map = registry.stage_map()
     protocol_stage_map = build_protocol_r_760m_stage_map(
         revised_global_batch_size=args.revised_global_batch_size,
+        revised_ext_global_batch_size=args.revised_ext_global_batch_size,
+        revised_adapt_n_state_parallel=args.revised_adapt_state_parallel,
+        revised_ext_n_state_parallel=args.revised_ext_state_parallel,
     )
 
     protocol_manifest = build_protocol_r_760m_manifest(
         paper_run_id=args.paper_run_id,
         exp_folder=args.exp_folder,
         revised_global_batch_size=args.revised_global_batch_size,
+        revised_ext_global_batch_size=args.revised_ext_global_batch_size,
+        revised_adapt_n_state_parallel=args.revised_adapt_state_parallel,
+        revised_ext_n_state_parallel=args.revised_ext_state_parallel,
         save_milestone_freq=args.save_milestone_freq,
         seed=args.seed,
         attention_implementation=attention_override,
     )
     protocol_out = (
-        repo_root / "reports" / "paper" / args.paper_run_id / "launch" / "protocol_manifest.json"
+        repo_root
+        / "reports"
+        / "paper"
+        / args.paper_run_id
+        / "launch"
+        / "protocol_manifest.json"
     ).resolve()
     _write_json(protocol_out, protocol_manifest)
 
@@ -267,11 +341,15 @@ def main() -> int:
         wandb_project=args.wandb_project,
         wandb_key=args.wandb_key,
         global_batch_size=args.revised_global_batch_size,
-        ext_global_batch_size=args.revised_global_batch_size,
+        ext_global_batch_size=args.revised_ext_global_batch_size,
+        n_state_parallel=args.revised_adapt_state_parallel,
+        ext_n_state_parallel=args.revised_ext_state_parallel,
         save_milestone_freq=args.save_milestone_freq,
         dry_run=args.dry_run,
         paper_run_id=args.paper_run_id,
-        require_dataset_fingerprint=(not args.allow_missing_fingerprints and not args.dry_run),
+        require_dataset_fingerprint=(
+            not args.allow_missing_fingerprints and not args.dry_run
+        ),
     )
 
     rows: list[dict[str, Any]] = []
@@ -287,7 +365,9 @@ def main() -> int:
             stage = stage_map[stage_id]
             run_id = stage.exp_name
             spec = protocol_stage_map[stage_id]
-            if args.skip_existing and _checkpoint_exists(opts.checkpoint_root, opts.exp_folder, run_id):
+            if args.skip_existing and _checkpoint_exists(
+                opts.checkpoint_root, opts.exp_folder, run_id
+            ):
                 rows.append(
                     {
                         "step_id": f"train:{stage_id}",
@@ -296,8 +376,10 @@ def main() -> int:
                         "run_id": run_id,
                         "status": "skipped_existing",
                         "revised_global_batch_size": spec.revised_global_batch_size,
+                        "revised_n_state_parallel": spec.revised_n_state_parallel,
                         "revised_total_steps": spec.revised_total_steps,
                         "attention_implementation": attention_override,
+                        "swa_prefix_attention_implementation": prefix_attention_override,
                     }
                 )
                 continue
@@ -310,8 +392,12 @@ def main() -> int:
                 artifact_root=artifact_root,
             )
             parent_refs_override = resume_plan["parent_refs_override"]
-            explicit_resume_checkpoint_path = resume_plan["explicit_resume_checkpoint_path"]
-            explicit_resume_checkpoint_format = resume_plan["explicit_resume_checkpoint_format"]
+            explicit_resume_checkpoint_path = resume_plan[
+                "explicit_resume_checkpoint_path"
+            ]
+            explicit_resume_checkpoint_format = resume_plan[
+                "explicit_resume_checkpoint_format"
+            ]
             extra_overrides = list(resume_plan["extra_overrides"])
             seed_source = str(resume_plan["seed_source"])
             resume_source = str(resume_plan["resume_source"])
@@ -334,6 +420,8 @@ def main() -> int:
                     "paper_stage_label": PAPER_STAGE_LABELS_760M[stage_id],
                     "seed_source": seed_source or "stage_parent",
                     "attention_implementation": attention_override or "default_runtime",
+                    "swa_prefix_attention_implementation": prefix_attention_override
+                    or "default_runtime",
                 },
             )
             rows.append(
@@ -348,10 +436,12 @@ def main() -> int:
                     "tokens_seen": result.tokens_seen,
                     "run_dir": result.run_dir,
                     "revised_global_batch_size": spec.revised_global_batch_size,
+                    "revised_n_state_parallel": spec.revised_n_state_parallel,
                     "revised_total_steps": spec.revised_total_steps,
                     "seed_source": seed_source or "stage_parent",
                     "resume_source": resume_source or "stage_parent",
                     "attention_implementation": attention_override,
+                    "swa_prefix_attention_implementation": prefix_attention_override,
                 }
             )
             if str(result.status) == "succeeded":
@@ -367,7 +457,12 @@ def main() -> int:
                 break
 
     summary_out = (
-        repo_root / "reports" / "paper" / args.paper_run_id / "launch" / "launcher_summary.json"
+        repo_root
+        / "reports"
+        / "paper"
+        / args.paper_run_id
+        / "launch"
+        / "launcher_summary.json"
     ).resolve()
     if train_failed:
         _write_json(
@@ -378,13 +473,16 @@ def main() -> int:
                 "phase": args.phase,
                 "protocol_manifest": str(protocol_out),
                 "attention_implementation": attention_override,
+                "swa_prefix_attention_implementation": prefix_attention_override,
                 "rows": rows,
             },
         )
         return 1
 
     if not args.skip_eval:
-        eval_stages = ",".join(stage_id for stage_id in selected_stage_ids if stage_id != "S2_ADAPT")
+        eval_stages = ",".join(
+            stage_id for stage_id in selected_stage_ids if stage_id != "S2_ADAPT"
+        )
         cmd_eval = [
             "uv",
             "run",
@@ -439,6 +537,7 @@ def main() -> int:
                     "phase": args.phase,
                     "protocol_manifest": str(protocol_out),
                     "attention_implementation": attention_override,
+                    "swa_prefix_attention_implementation": prefix_attention_override,
                     "rows": rows,
                 },
             )
@@ -493,6 +592,7 @@ def main() -> int:
                         "phase": args.phase,
                         "protocol_manifest": str(protocol_out),
                         "attention_implementation": attention_override,
+                        "swa_prefix_attention_implementation": prefix_attention_override,
                         "rows": rows,
                     },
                 )
@@ -519,7 +619,9 @@ def main() -> int:
                 args.paper_run_id,
             ]
             rc = _run(cmd_figures, dry_run=args.dry_run)
-            rows.append({"step_id": "figures", "command": cmd_figures, "returncode": rc})
+            rows.append(
+                {"step_id": "figures", "command": cmd_figures, "returncode": rc}
+            )
             if rc == 0:
                 _maybe_sync_b2(
                     args=args,
@@ -537,6 +639,7 @@ def main() -> int:
                         "phase": args.phase,
                         "protocol_manifest": str(protocol_out),
                         "attention_implementation": attention_override,
+                        "swa_prefix_attention_implementation": prefix_attention_override,
                         "rows": rows,
                     },
                 )
@@ -558,6 +661,7 @@ def main() -> int:
             "phase": args.phase,
             "protocol_manifest": str(protocol_out),
             "attention_implementation": attention_override,
+            "swa_prefix_attention_implementation": prefix_attention_override,
             "rows": rows,
         },
     )

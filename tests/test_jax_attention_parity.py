@@ -11,7 +11,7 @@ HAS_JAX = importlib.util.find_spec("jax") is not None
 
 @unittest.skipUnless(HAS_JAX, "jax not installed")
 class JaxAttentionParityTest(unittest.TestCase):
-    def _make_cfg(self, *, block: str = "self_attention"):
+    def _make_cfg(self, *, block: str = "self_attention", force_flash: bool = True):
         from ttt.config import ModelConfig
 
         return ModelConfig(
@@ -24,7 +24,7 @@ class JaxAttentionParityTest(unittest.TestCase):
             sliding_window_size=8,
             seq_len=16,
             vocab_size=32,
-            force_flash=True,
+            force_flash=force_flash,
         )
 
     def _make_seq(self, seq_len: int):
@@ -60,7 +60,10 @@ class JaxAttentionParityTest(unittest.TestCase):
 
         with (
             mock.patch("jax.default_backend", return_value="gpu"),
-            mock.patch("jax.lax.with_sharding_constraint", side_effect=lambda x, *_args, **_kwargs: x),
+            mock.patch(
+                "jax.lax.with_sharding_constraint",
+                side_effect=lambda x, *_args, **_kwargs: x,
+            ),
             mock.patch("jax.nn.dot_product_attention", side_effect=fake_attention),
         ):
             _out, _state = model(hidden_states, seq, state, is_prefix=False)
@@ -93,7 +96,10 @@ class JaxAttentionParityTest(unittest.TestCase):
 
         with (
             mock.patch("jax.default_backend", return_value="gpu"),
-            mock.patch("jax.lax.with_sharding_constraint", side_effect=lambda x, *_args, **_kwargs: x),
+            mock.patch(
+                "jax.lax.with_sharding_constraint",
+                side_effect=lambda x, *_args, **_kwargs: x,
+            ),
             mock.patch("jax.nn.dot_product_attention", side_effect=fake_attention),
         ):
             _out, _state = model(hidden_states, seq, state, is_prefix=False)
@@ -126,9 +132,14 @@ class JaxAttentionParityTest(unittest.TestCase):
             return query
 
         with (
-            mock.patch.dict(os.environ, {"TTT_ATTENTION_IMPLEMENTATION": "xla"}, clear=False),
+            mock.patch.dict(
+                os.environ, {"TTT_ATTENTION_IMPLEMENTATION": "xla"}, clear=False
+            ),
             mock.patch("jax.default_backend", return_value="gpu"),
-            mock.patch("jax.lax.with_sharding_constraint", side_effect=lambda x, *_args, **_kwargs: x),
+            mock.patch(
+                "jax.lax.with_sharding_constraint",
+                side_effect=lambda x, *_args, **_kwargs: x,
+            ),
             mock.patch("jax.nn.dot_product_attention", side_effect=fake_attention),
         ):
             _out, _state = model(hidden_states, seq, state, is_prefix=False)
@@ -160,9 +171,14 @@ class JaxAttentionParityTest(unittest.TestCase):
             return query
 
         with (
-            mock.patch.dict(os.environ, {"TTT_ATTENTION_IMPLEMENTATION": "none"}, clear=False),
+            mock.patch.dict(
+                os.environ, {"TTT_ATTENTION_IMPLEMENTATION": "none"}, clear=False
+            ),
             mock.patch("jax.default_backend", return_value="gpu"),
-            mock.patch("jax.lax.with_sharding_constraint", side_effect=lambda x, *_args, **_kwargs: x),
+            mock.patch(
+                "jax.lax.with_sharding_constraint",
+                side_effect=lambda x, *_args, **_kwargs: x,
+            ),
             mock.patch("jax.nn.dot_product_attention", side_effect=fake_attention),
         ):
             _out, _state = model(hidden_states, seq, state, is_prefix=False)
@@ -173,6 +189,53 @@ class JaxAttentionParityTest(unittest.TestCase):
                 "local_window_size": (cfg.sliding_window_size - 1, 0),
                 "is_causal": True,
                 "implementation": None,
+            },
+        )
+
+    def test_swa_prefix_attention_implementation_can_be_overridden_independently(
+        self,
+    ) -> None:
+        import equinox as eqx
+        import jax.numpy as jnp
+        import jax.random as jrandom
+
+        from ttt.jax_runtime.model.attention import SWA
+
+        cfg = self._make_cfg(block="SWA", force_flash=False)
+        model, state = eqx.nn.make_with_state(SWA)(cfg, key=jrandom.PRNGKey(0))
+        hidden_states = jnp.ones((4, cfg.hidden_size), dtype=jnp.float32)
+        seq = self._make_seq(4)
+
+        recorded: dict[str, object] = {}
+
+        def fake_attention(query, key, value, **kwargs):
+            recorded["kwargs"] = kwargs
+            return query
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "TTT_ATTENTION_IMPLEMENTATION": "none",
+                    "TTT_SWA_PREFIX_ATTENTION_IMPLEMENTATION": "xla",
+                },
+                clear=False,
+            ),
+            mock.patch("jax.default_backend", return_value="gpu"),
+            mock.patch(
+                "jax.lax.with_sharding_constraint",
+                side_effect=lambda x, *_args, **_kwargs: x,
+            ),
+            mock.patch("jax.nn.dot_product_attention", side_effect=fake_attention),
+        ):
+            _out, _state = model(hidden_states, seq, state, is_prefix=True)
+
+        self.assertEqual(
+            recorded["kwargs"],
+            {
+                "is_causal": True,
+                "local_window_size": (cfg.sliding_window_size - 1, 0),
+                "implementation": "xla",
             },
         )
 

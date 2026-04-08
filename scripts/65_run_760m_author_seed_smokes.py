@@ -23,15 +23,22 @@ STAGE_SOURCES: dict[str, str] = {
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
-def _apply_attention_implementation_override(value: str | None) -> str | None:
-    override = str(value or "").strip().lower()
-    if not override:
-        return None
-    os.environ["TTT_ATTENTION_IMPLEMENTATION"] = override
-    return override
+def _apply_attention_overrides(
+    attention_implementation: str | None,
+    swa_prefix_attention_implementation: str | None,
+) -> tuple[str | None, str | None]:
+    global_override = str(attention_implementation or "").strip().lower()
+    prefix_override = str(swa_prefix_attention_implementation or "").strip().lower()
+    if global_override:
+        os.environ["TTT_ATTENTION_IMPLEMENTATION"] = global_override
+    if prefix_override:
+        os.environ["TTT_SWA_PREFIX_ATTENTION_IMPLEMENTATION"] = prefix_override
+    return (global_override or None, prefix_override or None)
 
 
 def _checkpoint_written(checkpoint_root: Path, exp_folder: str, run_id: str) -> bool:
@@ -42,7 +49,11 @@ def _first_and_last_metrics(run_dir: Path) -> tuple[dict[str, Any], dict[str, An
     metrics_path = run_dir / "metrics.jsonl"
     if not metrics_path.exists():
         return {}, {}
-    rows = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        json.loads(line)
+        for line in metrics_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     if not rows:
         return {}, {}
     return rows[0], rows[-1]
@@ -54,10 +65,20 @@ def parse_args() -> argparse.Namespace:
             "Run the 2-step 760M author-seeded smoke gates for S0, S1, S2_ADAPT, and S3."
         )
     )
-    parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--registry", type=Path, default=Path("./configs/research/warmstart_registry.yaml"))
-    parser.add_argument("--artifact-root", type=Path, default=Path("./artifacts/author_checkpoints"))
-    parser.add_argument("--paper-run-id", default="protocol_r_760m_author_seed_smokes_v1")
+    parser.add_argument(
+        "--repo-root", type=Path, default=Path(__file__).resolve().parents[1]
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        default=Path("./configs/research/warmstart_registry.yaml"),
+    )
+    parser.add_argument(
+        "--artifact-root", type=Path, default=Path("./artifacts/author_checkpoints")
+    )
+    parser.add_argument(
+        "--paper-run-id", default="protocol_r_760m_author_seed_smokes_v1"
+    )
     parser.add_argument("--exp-folder", default="protocol_r_760m_author_seed_smokes_v1")
     parser.add_argument("--exp-dir", type=Path, default=Path("./experiments"))
     parser.add_argument("--checkpoint-root", type=Path, default=Path("./checkpoints"))
@@ -91,6 +112,15 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional TTT_ATTENTION_IMPLEMENTATION override forwarded to train subprocesses.",
     )
+    parser.add_argument(
+        "--swa-prefix-attention-implementation",
+        choices=("auto", "default", "none", "cudnn", "xla"),
+        default="",
+        help=(
+            "Optional TTT_SWA_PREFIX_ATTENTION_IMPLEMENTATION override forwarded to "
+            "the SWA prefix/full-window attention path only."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -99,7 +129,10 @@ def main() -> int:
     args = parse_args()
     repo_root = args.repo_root.expanduser().resolve()
     load_env_file(repo_root / ".env")
-    attention_override = _apply_attention_implementation_override(args.attention_implementation)
+    attention_override, prefix_attention_override = _apply_attention_overrides(
+        args.attention_implementation,
+        args.swa_prefix_attention_implementation,
+    )
 
     registry = load_registry(args.registry.expanduser().resolve())
     stage_map = registry.stage_map()
@@ -127,7 +160,9 @@ def main() -> int:
         save_milestone_freq=args.save_milestone_freq,
         dry_run=args.dry_run,
         paper_run_id=args.paper_run_id,
-        require_dataset_fingerprint=(not args.allow_missing_fingerprints and not args.dry_run),
+        require_dataset_fingerprint=(
+            not args.allow_missing_fingerprints and not args.dry_run
+        ),
     )
 
     rows: list[dict[str, Any]] = []
@@ -143,7 +178,9 @@ def main() -> int:
             "backend.distributed=false",
         ]
         if args.global_batch_size is not None:
-            extra_overrides.append(f"training.global_batch_size={args.global_batch_size}")
+            extra_overrides.append(
+                f"training.global_batch_size={args.global_batch_size}"
+            )
         extra_overrides.extend(args.extra_override)
         result = run_stage(
             stage=stage,
@@ -161,7 +198,9 @@ def main() -> int:
         )
         run_dir = Path(result.run_dir).resolve()
         first_metrics, last_metrics = _first_and_last_metrics(run_dir)
-        checkpoint_written = _checkpoint_written(opts.checkpoint_root, opts.exp_folder, run_id)
+        checkpoint_written = _checkpoint_written(
+            opts.checkpoint_root, opts.exp_folder, run_id
+        )
         rows.append(
             {
                 "stage_id": stage_id,
@@ -176,12 +215,19 @@ def main() -> int:
                 "metrics_path": str(run_dir / "metrics.jsonl"),
                 "checkpoint_written": checkpoint_written,
                 "first_metric_seen": bool(first_metrics),
-                "first_metric_step": first_metrics.get("step") if first_metrics else None,
-                "first_metric_loss_ce": first_metrics.get("loss_ce") if first_metrics else None,
+                "first_metric_step": first_metrics.get("step")
+                if first_metrics
+                else None,
+                "first_metric_loss_ce": first_metrics.get("loss_ce")
+                if first_metrics
+                else None,
                 "last_metric_step": last_metrics.get("step") if last_metrics else None,
-                "last_metric_loss_ce": last_metrics.get("loss_ce") if last_metrics else None,
+                "last_metric_loss_ce": last_metrics.get("loss_ce")
+                if last_metrics
+                else None,
                 "parent_checkpoint": parent_ref.to_dict(),
                 "attention_implementation": attention_override,
+                "swa_prefix_attention_implementation": prefix_attention_override,
             }
         )
 
@@ -192,6 +238,7 @@ def main() -> int:
         "exp_folder": args.exp_folder,
         "steps": args.steps,
         "attention_implementation": attention_override,
+        "swa_prefix_attention_implementation": prefix_attention_override,
         "rows": rows,
     }
     if args.summary_out is None:

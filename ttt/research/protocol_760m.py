@@ -11,6 +11,9 @@ PROTOCOL_R_760M_EXP_FOLDER = "protocol_r_760m_author_seed_v1"
 FAITHFUL_EXT_GLOBAL_BATCH_SIZE = 32
 FAITHFUL_ADAPT_GLOBAL_BATCH_SIZE = 64
 REVISED_8X_H200_GLOBAL_BATCH_SIZE = 8
+REVISED_8X_H200_EXT_GLOBAL_BATCH_SIZE = 4
+REVISED_8X_H200_ADAPT_STATE_PARALLEL = 1
+REVISED_8X_H200_EXT_STATE_PARALLEL = 2
 
 FAITHFUL_EXT_STEPS = 725
 FAITHFUL_ADAPT_STEPS = 2900
@@ -43,6 +46,7 @@ class StageProtocol760M:
     faithful_global_batch_size: int
     faithful_total_steps: int
     revised_global_batch_size: int
+    revised_n_state_parallel: int
     revised_total_steps: int
     author_seed_key: str = ""
     token_budget_preserved: bool = True
@@ -63,17 +67,29 @@ def scaled_steps_for_token_budget(
         raise ValueError("original_global_batch_size must be positive.")
     if revised_global_batch_size <= 0:
         raise ValueError("revised_global_batch_size must be positive.")
-    return int(math.ceil(original_steps * original_global_batch_size / revised_global_batch_size))
+    return int(
+        math.ceil(
+            original_steps * original_global_batch_size / revised_global_batch_size
+        )
+    )
 
 
 def build_protocol_r_760m_stage_map(
     *,
     revised_global_batch_size: int = REVISED_8X_H200_GLOBAL_BATCH_SIZE,
+    revised_ext_global_batch_size: int | None = None,
+    revised_adapt_n_state_parallel: int = REVISED_8X_H200_ADAPT_STATE_PARALLEL,
+    revised_ext_n_state_parallel: int = REVISED_8X_H200_EXT_STATE_PARALLEL,
 ) -> dict[str, StageProtocol760M]:
+    ext_global_batch_size = (
+        REVISED_8X_H200_EXT_GLOBAL_BATCH_SIZE
+        if revised_ext_global_batch_size is None
+        else revised_ext_global_batch_size
+    )
     ext_steps = scaled_steps_for_token_budget(
         original_steps=FAITHFUL_EXT_STEPS,
         original_global_batch_size=FAITHFUL_EXT_GLOBAL_BATCH_SIZE,
-        revised_global_batch_size=revised_global_batch_size,
+        revised_global_batch_size=ext_global_batch_size,
     )
     adapt_steps = scaled_steps_for_token_budget(
         original_steps=FAITHFUL_ADAPT_STEPS,
@@ -87,7 +103,8 @@ def build_protocol_r_760m_stage_map(
             kind="ext",
             faithful_global_batch_size=FAITHFUL_EXT_GLOBAL_BATCH_SIZE,
             faithful_total_steps=FAITHFUL_EXT_STEPS,
-            revised_global_batch_size=revised_global_batch_size,
+            revised_global_batch_size=ext_global_batch_size,
+            revised_n_state_parallel=revised_ext_n_state_parallel,
             revised_total_steps=ext_steps,
             author_seed_key=AUTHOR_SEED_SOURCES_760M["S0"],
         ),
@@ -97,7 +114,8 @@ def build_protocol_r_760m_stage_map(
             kind="ext",
             faithful_global_batch_size=FAITHFUL_EXT_GLOBAL_BATCH_SIZE,
             faithful_total_steps=FAITHFUL_EXT_STEPS,
-            revised_global_batch_size=revised_global_batch_size,
+            revised_global_batch_size=ext_global_batch_size,
+            revised_n_state_parallel=revised_ext_n_state_parallel,
             revised_total_steps=ext_steps,
             author_seed_key=AUTHOR_SEED_SOURCES_760M["S1"],
         ),
@@ -108,6 +126,7 @@ def build_protocol_r_760m_stage_map(
             faithful_global_batch_size=FAITHFUL_ADAPT_GLOBAL_BATCH_SIZE,
             faithful_total_steps=FAITHFUL_ADAPT_STEPS,
             revised_global_batch_size=revised_global_batch_size,
+            revised_n_state_parallel=revised_adapt_n_state_parallel,
             revised_total_steps=adapt_steps,
             author_seed_key=AUTHOR_SEED_SOURCES_760M["S2_ADAPT"],
         ),
@@ -117,7 +136,8 @@ def build_protocol_r_760m_stage_map(
             kind="ext",
             faithful_global_batch_size=FAITHFUL_EXT_GLOBAL_BATCH_SIZE,
             faithful_total_steps=FAITHFUL_EXT_STEPS,
-            revised_global_batch_size=revised_global_batch_size,
+            revised_global_batch_size=ext_global_batch_size,
+            revised_n_state_parallel=revised_ext_n_state_parallel,
             revised_total_steps=ext_steps,
         ),
         "S3": StageProtocol760M(
@@ -126,7 +146,8 @@ def build_protocol_r_760m_stage_map(
             kind="ext",
             faithful_global_batch_size=FAITHFUL_EXT_GLOBAL_BATCH_SIZE,
             faithful_total_steps=FAITHFUL_EXT_STEPS,
-            revised_global_batch_size=revised_global_batch_size,
+            revised_global_batch_size=ext_global_batch_size,
+            revised_n_state_parallel=revised_ext_n_state_parallel,
             revised_total_steps=ext_steps,
             author_seed_key=AUTHOR_SEED_SOURCES_760M["S3"],
         ),
@@ -138,13 +159,20 @@ def build_protocol_r_760m_manifest(
     paper_run_id: str,
     exp_folder: str,
     revised_global_batch_size: int = REVISED_8X_H200_GLOBAL_BATCH_SIZE,
+    revised_ext_global_batch_size: int | None = None,
+    revised_adapt_n_state_parallel: int = REVISED_8X_H200_ADAPT_STATE_PARALLEL,
+    revised_ext_n_state_parallel: int = REVISED_8X_H200_EXT_STATE_PARALLEL,
     save_milestone_freq: int = 120,
     seed: int = 0,
     attention_implementation: str | None = None,
 ) -> dict[str, Any]:
     stage_map = build_protocol_r_760m_stage_map(
         revised_global_batch_size=revised_global_batch_size,
+        revised_ext_global_batch_size=revised_ext_global_batch_size,
+        revised_adapt_n_state_parallel=revised_adapt_n_state_parallel,
+        revised_ext_n_state_parallel=revised_ext_n_state_parallel,
     )
+    ext_global_batch_size = stage_map["S0"].revised_global_batch_size
     return {
         "schema_version": "1.0",
         "paper_run_id": paper_run_id,
@@ -152,10 +180,14 @@ def build_protocol_r_760m_manifest(
         "protocol": "revised",
         "description": (
             "Author-seeded 760M revised matched protocol for 8x H200. "
-            "All train stages run at the smallest passing global batch size, "
-            "with total steps scaled to preserve the original token budgets."
+            "The bridge stage runs at the smallest passing data-parallel batch, "
+            "while the 32K stages run at the smallest passing batch/mesh layout. "
+            "Total steps are scaled to preserve the original token budgets."
         ),
-        "revised_global_batch_size": revised_global_batch_size,
+        "revised_adapt_global_batch_size": revised_global_batch_size,
+        "revised_ext_global_batch_size": ext_global_batch_size,
+        "revised_adapt_n_state_parallel": revised_adapt_n_state_parallel,
+        "revised_ext_n_state_parallel": revised_ext_n_state_parallel,
         "faithful_ext_global_batch_size": FAITHFUL_EXT_GLOBAL_BATCH_SIZE,
         "faithful_adapt_global_batch_size": FAITHFUL_ADAPT_GLOBAL_BATCH_SIZE,
         "faithful_ext_steps": FAITHFUL_EXT_STEPS,

@@ -10,6 +10,9 @@ from ttt.research.protocol_760m import (
     FAITHFUL_EXT_GLOBAL_BATCH_SIZE,
     FAITHFUL_EXT_STEPS,
     REVISED_8X_H200_GLOBAL_BATCH_SIZE,
+    REVISED_8X_H200_EXT_GLOBAL_BATCH_SIZE,
+    REVISED_8X_H200_EXT_STATE_PARALLEL,
+    REVISED_8X_H200_ADAPT_STATE_PARALLEL,
     build_protocol_r_760m_manifest,
     build_protocol_r_760m_stage_map,
     scaled_steps_for_token_budget,
@@ -22,9 +25,9 @@ class Protocol760MTest(unittest.TestCase):
             scaled_steps_for_token_budget(
                 original_steps=FAITHFUL_EXT_STEPS,
                 original_global_batch_size=FAITHFUL_EXT_GLOBAL_BATCH_SIZE,
-                revised_global_batch_size=REVISED_8X_H200_GLOBAL_BATCH_SIZE,
+                revised_global_batch_size=REVISED_8X_H200_EXT_GLOBAL_BATCH_SIZE,
             ),
-            2900,
+            5800,
         )
         self.assertEqual(
             scaled_steps_for_token_budget(
@@ -37,12 +40,14 @@ class Protocol760MTest(unittest.TestCase):
 
     def test_stage_map_uses_revised_batch_for_all_runtime_stages(self) -> None:
         stage_map = build_protocol_r_760m_stage_map()
-        self.assertEqual(stage_map["S0"].revised_global_batch_size, 8)
-        self.assertEqual(stage_map["S1"].revised_global_batch_size, 8)
+        self.assertEqual(stage_map["S0"].revised_global_batch_size, 4)
+        self.assertEqual(stage_map["S1"].revised_global_batch_size, 4)
         self.assertEqual(stage_map["S2_ADAPT"].revised_global_batch_size, 8)
-        self.assertEqual(stage_map["S2"].revised_global_batch_size, 8)
-        self.assertEqual(stage_map["S3"].revised_global_batch_size, 8)
-        self.assertEqual(stage_map["S0"].revised_total_steps, 2900)
+        self.assertEqual(stage_map["S2"].revised_global_batch_size, 4)
+        self.assertEqual(stage_map["S3"].revised_global_batch_size, 4)
+        self.assertEqual(stage_map["S0"].revised_n_state_parallel, 2)
+        self.assertEqual(stage_map["S2_ADAPT"].revised_n_state_parallel, 1)
+        self.assertEqual(stage_map["S0"].revised_total_steps, 5800)
         self.assertEqual(stage_map["S2_ADAPT"].revised_total_steps, 23200)
 
     def test_protocol_manifest_records_effective_step_scaling(self) -> None:
@@ -50,11 +55,17 @@ class Protocol760MTest(unittest.TestCase):
             paper_run_id="protocol_r_760m_author_seed_v1",
             exp_folder="protocol_r_760m_author_seed_v1",
         )
-        self.assertEqual(manifest["revised_global_batch_size"], 8)
-        self.assertEqual(manifest["effective_ext_steps"], 2900)
+        self.assertEqual(manifest["revised_adapt_global_batch_size"], 8)
+        self.assertEqual(manifest["revised_ext_global_batch_size"], 4)
+        self.assertEqual(manifest["revised_adapt_n_state_parallel"], 1)
+        self.assertEqual(manifest["revised_ext_n_state_parallel"], 2)
+        self.assertEqual(manifest["effective_ext_steps"], 5800)
         self.assertEqual(manifest["effective_adapt_steps"], 23200)
         self.assertEqual(manifest["stages"]["S3"]["author_seed_key"], "760m_e2e")
-        self.assertEqual(manifest["execution_tranches"]["core"], ["S2_ADAPT", "S2", "S3"])
+        self.assertEqual(manifest["stages"]["S3"]["revised_n_state_parallel"], 2)
+        self.assertEqual(
+            manifest["execution_tranches"]["core"], ["S2_ADAPT", "S2", "S3"]
+        )
 
     def test_stage_groups_match_staged_760m_execution_plan(self) -> None:
         self.assertEqual(CORE_760M_STAGE_IDS, ("S2_ADAPT", "S2", "S3"))

@@ -166,6 +166,7 @@ echo "[bootstrap] gate passed, launching full C1 ladder" | tee "$RUN_LOG"
 ladder_rc=0
 if ! uv run --exact python "$REPO_ROOT/scripts/66_run_760m_author_seed_ladder.py" \
   --phase core \
+  --skip-existing \
   --dclm-root "$DATA_ROOT/dclm_filter_8k" \
   --books-root "$DATA_ROOT/books3" \
   --attention-implementation "$ATTN_IMPL" \

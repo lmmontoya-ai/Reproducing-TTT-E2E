@@ -7,13 +7,19 @@ from pathlib import Path
 from typing import Any
 
 from ttt.research.author_checkpoints import author_seed_checkpoint_ref, load_env_file
-from ttt.research.eta_760m import estimate_stage_training_wall_seconds, read_metrics_rows
+from ttt.research.eta_760m import (
+    estimate_stage_training_wall_seconds,
+    read_metrics_rows,
+)
 from ttt.research.lineage import resolve_checkpoint_ref
 from ttt.research.orchestrator import OrchestratorOptions, run_stage
 from ttt.research.protocol_760m import (
     ALL_760M_STAGE_IDS,
     AUTHOR_SEED_SOURCES_760M,
     PAPER_STAGE_LABELS_760M,
+    REVISED_8X_H200_EXT_GLOBAL_BATCH_SIZE,
+    REVISED_8X_H200_EXT_STATE_PARALLEL,
+    REVISED_8X_H200_ADAPT_STATE_PARALLEL,
     build_protocol_r_760m_manifest,
     build_protocol_r_760m_stage_map,
 )
@@ -23,7 +29,9 @@ from ttt.research.types import BudgetSpec, CheckpointRef, utc_now_iso
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _metrics_path(run_dir: Path) -> Path:
@@ -51,19 +59,44 @@ def parse_args() -> argparse.Namespace:
             "from post-warmup step times."
         )
     )
-    parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--registry", type=Path, default=Path("./configs/research/warmstart_registry.yaml"))
-    parser.add_argument("--artifact-root", type=Path, default=Path("./artifacts/author_checkpoints"))
+    parser.add_argument(
+        "--repo-root", type=Path, default=Path(__file__).resolve().parents[1]
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        default=Path("./configs/research/warmstart_registry.yaml"),
+    )
+    parser.add_argument(
+        "--artifact-root", type=Path, default=Path("./artifacts/author_checkpoints")
+    )
     parser.add_argument("--paper-run-id", default="protocol_r_760m_eta_bench_v1")
     parser.add_argument("--exp-folder", default="protocol_r_760m_eta_bench_v1")
     parser.add_argument("--exp-dir", type=Path, default=Path("./experiments"))
     parser.add_argument("--checkpoint-root", type=Path, default=Path("./checkpoints"))
-    parser.add_argument("--profile-root", type=Path, default=Path("./artifacts/external_models"))
+    parser.add_argument(
+        "--profile-root", type=Path, default=Path("./artifacts/external_models")
+    )
     parser.add_argument("--dclm-root", type=Path, required=True)
     parser.add_argument("--books-root", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--warmup-steps", type=int, default=2)
     parser.add_argument("--revised-global-batch-size", type=int, default=8)
+    parser.add_argument(
+        "--revised-ext-global-batch-size",
+        type=int,
+        default=REVISED_8X_H200_EXT_GLOBAL_BATCH_SIZE,
+    )
+    parser.add_argument(
+        "--revised-adapt-state-parallel",
+        type=int,
+        default=REVISED_8X_H200_ADAPT_STATE_PARALLEL,
+    )
+    parser.add_argument(
+        "--revised-ext-state-parallel",
+        type=int,
+        default=REVISED_8X_H200_EXT_STATE_PARALLEL,
+    )
     parser.add_argument("--save-milestone-freq", type=int, default=999)
     parser.add_argument(
         "--stage-ids",
@@ -87,17 +120,28 @@ def main() -> int:
     stage_map = registry.stage_map()
     protocol_stage_map = build_protocol_r_760m_stage_map(
         revised_global_batch_size=args.revised_global_batch_size,
+        revised_ext_global_batch_size=args.revised_ext_global_batch_size,
+        revised_adapt_n_state_parallel=args.revised_adapt_state_parallel,
+        revised_ext_n_state_parallel=args.revised_ext_state_parallel,
     )
 
     protocol_manifest = build_protocol_r_760m_manifest(
         paper_run_id=args.paper_run_id,
         exp_folder=args.exp_folder,
         revised_global_batch_size=args.revised_global_batch_size,
+        revised_ext_global_batch_size=args.revised_ext_global_batch_size,
+        revised_adapt_n_state_parallel=args.revised_adapt_state_parallel,
+        revised_ext_n_state_parallel=args.revised_ext_state_parallel,
         save_milestone_freq=args.save_milestone_freq,
         seed=0,
     )
     protocol_out = (
-        repo_root / "reports" / "paper" / args.paper_run_id / "launch" / "protocol_manifest.json"
+        repo_root
+        / "reports"
+        / "paper"
+        / args.paper_run_id
+        / "launch"
+        / "protocol_manifest.json"
     ).resolve()
     _write_json(protocol_out, protocol_manifest)
 
@@ -122,11 +166,15 @@ def main() -> int:
         wandb_project="none",
         wandb_key="env",
         global_batch_size=args.revised_global_batch_size,
-        ext_global_batch_size=args.revised_global_batch_size,
+        ext_global_batch_size=args.revised_ext_global_batch_size,
+        n_state_parallel=args.revised_adapt_state_parallel,
+        ext_n_state_parallel=args.revised_ext_state_parallel,
         save_milestone_freq=args.save_milestone_freq,
         dry_run=args.dry_run,
         paper_run_id=args.paper_run_id,
-        require_dataset_fingerprint=(not args.allow_missing_fingerprints and not args.dry_run),
+        require_dataset_fingerprint=(
+            not args.allow_missing_fingerprints and not args.dry_run
+        ),
     )
 
     rows: list[dict[str, Any]] = []
@@ -146,13 +194,21 @@ def main() -> int:
 
         if stage_id in AUTHOR_SEED_SOURCES_760M:
             seed_source = AUTHOR_SEED_SOURCES_760M[stage_id]
-            parent_refs_override = [author_seed_checkpoint_ref(args.artifact_root.expanduser().resolve(), seed_source)]
-            explicit_resume_checkpoint_path = args.artifact_root.expanduser().resolve() / seed_source
+            parent_refs_override = [
+                author_seed_checkpoint_ref(
+                    args.artifact_root.expanduser().resolve(), seed_source
+                )
+            ]
+            explicit_resume_checkpoint_path = (
+                args.artifact_root.expanduser().resolve() / seed_source
+            )
             explicit_resume_checkpoint_format = "orbax"
             extra_overrides.append("training.load_part=params")
         elif stage_id == "S2":
             if s2_adapt_parent_ref is None or s2_adapt_resume_root is None:
-                raise RuntimeError("S2 benchmark requires a completed S2_ADAPT benchmark parent.")
+                raise RuntimeError(
+                    "S2 benchmark requires a completed S2_ADAPT benchmark parent."
+                )
             parent_refs_override = [s2_adapt_parent_ref]
             explicit_resume_checkpoint_path = s2_adapt_resume_root
             explicit_resume_checkpoint_format = "orbax"
@@ -219,8 +275,17 @@ def main() -> int:
                 "protocol_manifest": str(protocol_out),
                 "rows": rows,
             }
-            summary_out = args.summary_out.expanduser().resolve() if args.summary_out else (
-                repo_root / "reports" / "paper" / args.paper_run_id / "eta" / "eta_summary.json"
+            summary_out = (
+                args.summary_out.expanduser().resolve()
+                if args.summary_out
+                else (
+                    repo_root
+                    / "reports"
+                    / "paper"
+                    / args.paper_run_id
+                    / "eta"
+                    / "eta_summary.json"
+                )
             )
             _write_json(summary_out, payload)
             return 1
@@ -249,8 +314,17 @@ def main() -> int:
         "protocol_manifest": str(protocol_out),
         "rows": rows,
     }
-    summary_out = args.summary_out.expanduser().resolve() if args.summary_out else (
-        repo_root / "reports" / "paper" / args.paper_run_id / "eta" / "eta_summary.json"
+    summary_out = (
+        args.summary_out.expanduser().resolve()
+        if args.summary_out
+        else (
+            repo_root
+            / "reports"
+            / "paper"
+            / args.paper_run_id
+            / "eta"
+            / "eta_summary.json"
+        )
     )
     _write_json(summary_out, payload)
     print(f"Wrote 760M ETA benchmark summary: {summary_out}")

@@ -13,13 +13,17 @@ from equinox import nn
 from jax.sharding import PartitionSpec as P
 
 from ttt.config import ModelConfig
-from ttt.utils.jax_utils import get_float_dtype_by_name, maybe_double_remat, promote_dtype, tree_rearrange
+from ttt.utils.jax_utils import (
+    get_float_dtype_by_name,
+    maybe_double_remat,
+    promote_dtype,
+    tree_rearrange,
+)
 
 from .data import Batch
 
 
-def _attention_implementation(*, use_flash: bool):
-    override = os.environ.get("TTT_ATTENTION_IMPLEMENTATION", "").strip().lower()
+def _normalize_attention_override(override: str, *, use_flash: bool):
     if override in {"xla", "cudnn"}:
         return override
     if override in {"none", "default", "auto"}:
@@ -27,7 +31,22 @@ def _attention_implementation(*, use_flash: bool):
     return "cudnn" if use_flash else None
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, dtype=jnp.float32) -> jnp.ndarray:
+def _attention_implementation(*, use_flash: bool, path: str = "default"):
+    if path == "swa_prefix":
+        override = (
+            os.environ.get("TTT_SWA_PREFIX_ATTENTION_IMPLEMENTATION", "")
+            .strip()
+            .lower()
+        )
+        if override:
+            return _normalize_attention_override(override, use_flash=use_flash)
+    override = os.environ.get("TTT_ATTENTION_IMPLEMENTATION", "").strip().lower()
+    return _normalize_attention_override(override, use_flash=use_flash)
+
+
+def precompute_freqs_cis(
+    dim: int, end: int, theta: float = 10000.0, dtype=jnp.float32
+) -> jnp.ndarray:
     freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2).astype(dtype) / dim))
     t = jnp.arange(end)
     freqs = jnp.outer(t, freqs).astype(dtype)
@@ -40,7 +59,9 @@ def apply_rotary_emb(x: jnp.ndarray, freqs_cis: jnp.ndarray) -> jnp.ndarray:
     reshape_x = x.astype(jnp.float32).reshape(*x.shape[:-1], -1, 2)
     complex_x = jax.lax.complex(reshape_x[..., 0], reshape_x[..., 1])
     out = complex_x * freqs_cis
-    out = jnp.stack((jnp.real(out), jnp.imag(out)), axis=-1).reshape(*out.shape[:-1], -1)
+    out = jnp.stack((jnp.real(out), jnp.imag(out)), axis=-1).reshape(
+        *out.shape[:-1], -1
+    )
     return out.astype(input_dtype)
 
 
@@ -52,13 +73,25 @@ class NormalLinear(eqx.Module):
     name: str = eqx.field(static=True)
     weight: jax.Array
 
-    def __init__(self, config: ModelConfig, in_features: int, out_features: int, *, name: str, std: float, key):
+    def __init__(
+        self,
+        config: ModelConfig,
+        in_features: int,
+        out_features: int,
+        *,
+        name: str,
+        std: float,
+        key,
+    ):
         self.compute_dtype = get_float_dtype_by_name(config.compute_dtype)
         self.param_dtype = get_float_dtype_by_name(config.param_dtype)
         self.in_features = in_features
         self.out_features = out_features
         self.name = name
-        self.weight = jrandom.normal(key, (in_features, out_features), dtype=self.param_dtype) * std
+        self.weight = (
+            jrandom.normal(key, (in_features, out_features), dtype=self.param_dtype)
+            * std
+        )
 
     @jax.named_scope("ttt.transformer.NormalLinear")
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -98,23 +131,46 @@ class AttentionBase(eqx.Module):
         self.sliding_window_size = int(config.sliding_window_size)
         keys = jrandom.split(key, 4)
         self.wq, self.wk, self.wv, self.wo = (
-            NormalLinear(config, config.hidden_size, config.hidden_size, name=name, std=config.initializer_range, key=k)
+            NormalLinear(
+                config,
+                config.hidden_size,
+                config.hidden_size,
+                name=name,
+                std=config.initializer_range,
+                key=k,
+            )
             for k, name in zip(keys, ("wq", "wk", "wv", "wo"))
         )
-        self.q_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps, use_bias=False, dtype=self.param_dtype)
-        self.k_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps, use_bias=False, dtype=self.param_dtype)
+        self.q_norm = nn.RMSNorm(
+            self.head_dim,
+            eps=config.rms_norm_eps,
+            use_bias=False,
+            dtype=self.param_dtype,
+        )
+        self.k_norm = nn.RMSNorm(
+            self.head_dim,
+            eps=config.rms_norm_eps,
+            use_bias=False,
+            dtype=self.param_dtype,
+        )
         self.resid_dropout = nn.Dropout(p=config.resid_pdrop)
 
     @property
     def freqs_cis(self) -> jnp.ndarray:
         with jax.ensure_compile_time_eval():
-            return precompute_freqs_cis(self.head_dim, 2 * self.config.seq_len, theta=self.config.rope_theta)
+            return precompute_freqs_cis(
+                self.head_dim, 2 * self.config.seq_len, theta=self.config.rope_theta
+            )
 
     def _split_heads(self, x):
-        return tree_rearrange(x, "... (head dim) -> ... head dim", head=self.num_heads, dim=self.head_dim)
+        return tree_rearrange(
+            x, "... (head dim) -> ... head dim", head=self.num_heads, dim=self.head_dim
+        )
 
     def _merge_heads(self, x):
-        return tree_rearrange(x, "... head dim -> ... (head dim)", head=self.num_heads, dim=self.head_dim)
+        return tree_rearrange(
+            x, "... head dim -> ... (head dim)", head=self.num_heads, dim=self.head_dim
+        )
 
     def apply_rope(self, xis, position_ids: jnp.ndarray):
         freqs = jnp.take(self.freqs_cis, position_ids, axis=0)
@@ -129,7 +185,9 @@ class AttentionBase(eqx.Module):
     def project_qkv(self, hidden_states):
         return self.wq(hidden_states), self.wk(hidden_states), self.wv(hidden_states)
 
-    def get_attention_input(self, hidden_states: jnp.ndarray, position_ids: jnp.ndarray):
+    def get_attention_input(
+        self, hidden_states: jnp.ndarray, position_ids: jnp.ndarray
+    ):
         xq, xk, xv = self.project_qkv(hidden_states)
         xq, xk, xv = self._split_heads((xq, xk, xv))
         if self.config.qk_norm:
@@ -169,10 +227,23 @@ class AttentionBase(eqx.Module):
 
 
 class Attention(AttentionBase):
-    def __call__(self, hidden_states: jnp.ndarray, seq: Batch, state: nn.State, *, is_prefix: bool = False):
-        position_ids = seq.position_ids if seq.position_ids is not None else jnp.arange(hidden_states.shape[0], dtype=jnp.int32)
+    def __call__(
+        self,
+        hidden_states: jnp.ndarray,
+        seq: Batch,
+        state: nn.State,
+        *,
+        is_prefix: bool = False,
+    ):
+        position_ids = (
+            seq.position_ids
+            if seq.position_ids is not None
+            else jnp.arange(hidden_states.shape[0], dtype=jnp.int32)
+        )
         xq, xk, xv = self.get_attention_input(hidden_states, position_ids)
-        use_flash = (self.config.force_flash or is_prefix) and jax.default_backend() == "gpu"
+        use_flash = (
+            self.config.force_flash or is_prefix
+        ) and jax.default_backend() == "gpu"
         if use_flash:
             xq = jax.lax.with_sharding_constraint(xq, P(None, "state", None))
             xk = jax.lax.with_sharding_constraint(xk, P(None, "state", None))
@@ -185,16 +256,31 @@ class Attention(AttentionBase):
             implementation=_attention_implementation(use_flash=use_flash),
         )
         if use_flash:
-            attn_output = jax.lax.with_sharding_constraint(attn_output, P(None, "state", None))
+            attn_output = jax.lax.with_sharding_constraint(
+                attn_output, P(None, "state", None)
+            )
         attn_output = self._merge_heads(attn_output)
         return self.get_attention_output(attn_output), state
 
 
 class SWAFull(Attention):
-    def __call__(self, hidden_states: jnp.ndarray, seq: Batch, state: nn.State, *, is_prefix: bool = False):
-        position_ids = seq.position_ids if seq.position_ids is not None else jnp.arange(hidden_states.shape[0], dtype=jnp.int32)
+    def __call__(
+        self,
+        hidden_states: jnp.ndarray,
+        seq: Batch,
+        state: nn.State,
+        *,
+        is_prefix: bool = False,
+    ):
+        position_ids = (
+            seq.position_ids
+            if seq.position_ids is not None
+            else jnp.arange(hidden_states.shape[0], dtype=jnp.int32)
+        )
         xq, xk, xv = self.get_attention_input(hidden_states, position_ids)
-        use_flash = (self.config.force_flash or is_prefix) and jax.default_backend() == "gpu"
+        use_flash = (
+            self.config.force_flash or is_prefix
+        ) and jax.default_backend() == "gpu"
         if use_flash:
             xq = jax.lax.with_sharding_constraint(xq, P(None, "state", None))
             xk = jax.lax.with_sharding_constraint(xk, P(None, "state", None))
@@ -208,7 +294,9 @@ class SWAFull(Attention):
             implementation=_attention_implementation(use_flash=use_flash),
         )
         if use_flash:
-            attn_output = jax.lax.with_sharding_constraint(attn_output, P(None, "state", None))
+            attn_output = jax.lax.with_sharding_constraint(
+                attn_output, P(None, "state", None)
+            )
         attn_output = self._merge_heads(attn_output)
         return self.get_attention_output(attn_output), state
 
@@ -228,8 +316,12 @@ class SWA(AttentionBase):
 
     def init_kv_cache(self):
         return (
-            jnp.zeros((self.window_size, self.config.hidden_size), dtype=self.compute_dtype),
-            jnp.zeros((self.window_size, self.config.hidden_size), dtype=self.compute_dtype),
+            jnp.zeros(
+                (self.window_size, self.config.hidden_size), dtype=self.compute_dtype
+            ),
+            jnp.zeros(
+                (self.window_size, self.config.hidden_size), dtype=self.compute_dtype
+            ),
         )
 
     def sw_causal_mask(self, chunk_id):
@@ -243,7 +335,11 @@ class SWA(AttentionBase):
         return (qi >= ki) & (qi < ki + self.window_size) & (ki >= 0)
 
     def full_sw_attention(self, hidden_states, seq: Batch, state: nn.State):
-        position_ids = seq.position_ids if seq.position_ids is not None else jnp.arange(hidden_states.shape[0], dtype=jnp.int32)
+        position_ids = (
+            seq.position_ids
+            if seq.position_ids is not None
+            else jnp.arange(hidden_states.shape[0], dtype=jnp.int32)
+        )
         xq, xk, xv = self.get_attention_input(hidden_states, position_ids)
         xq = jax.lax.with_sharding_constraint(xq, P(None, "state", None))
         xk = jax.lax.with_sharding_constraint(xk, P(None, "state", None))
@@ -254,13 +350,25 @@ class SWA(AttentionBase):
             xv,
             is_causal=True,
             local_window_size=(self.window_size - 1, 0),
-            implementation=_attention_implementation(use_flash=jax.default_backend() == "gpu"),
+            implementation=_attention_implementation(
+                use_flash=jax.default_backend() == "gpu",
+                path="swa_prefix",
+            ),
         )
-        attn_output = jax.lax.with_sharding_constraint(attn_output, P(None, "state", None))
+        attn_output = jax.lax.with_sharding_constraint(
+            attn_output, P(None, "state", None)
+        )
         attn_output = self._merge_heads(attn_output)
         return self.get_attention_output(attn_output), state
 
-    def __call__(self, hidden_states: jnp.ndarray, seq: Batch, state: nn.State, *, is_prefix: bool = False):
+    def __call__(
+        self,
+        hidden_states: jnp.ndarray,
+        seq: Batch,
+        state: nn.State,
+        *,
+        is_prefix: bool = False,
+    ):
         if is_prefix:
             return self.full_sw_attention(hidden_states, seq, state)
 
@@ -282,15 +390,21 @@ class SWA(AttentionBase):
 
         xk = jnp.concatenate([prev_k, xk], axis=0)
         xv = jnp.concatenate([prev_v, xv], axis=0)
-        new_kv_cache = self._merge_heads((xk[-self.window_size :], xv[-self.window_size :]))
+        new_kv_cache = self._merge_heads(
+            (xk[-self.window_size :], xv[-self.window_size :])
+        )
 
         xq = self.apply_rope(
             xq,
-            position_ids=jnp.arange(self.window_size + self.mini_batch_size, dtype=jnp.int32)[-self.mini_batch_size :],
+            position_ids=jnp.arange(
+                self.window_size + self.mini_batch_size, dtype=jnp.int32
+            )[-self.mini_batch_size :],
         )
         xk = self.apply_rope(
             xk,
-            position_ids=jnp.arange(self.window_size + self.mini_batch_size, dtype=jnp.int32),
+            position_ids=jnp.arange(
+                self.window_size + self.mini_batch_size, dtype=jnp.int32
+            ),
         )
 
         chunk_id = state.get(self.chunk_index)

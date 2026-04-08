@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from .budget import build_budget_manifest, estimate_gpu_hours_from_wall, estimate_tokens
-from .lineage import build_checkpoint_manifest, resolve_checkpoint_ref, resolve_stage_parents, validate_stage_profiles
+from .lineage import (
+    build_checkpoint_manifest,
+    resolve_checkpoint_ref,
+    resolve_stage_parents,
+    validate_stage_profiles,
+)
 from .tracking import (
     append_jsonl,
     detect_git_state,
@@ -51,6 +56,8 @@ class OrchestratorOptions:
     wandb_key: str
     global_batch_size: int | None = None
     ext_global_batch_size: int | None = None
+    n_state_parallel: int | None = None
+    ext_n_state_parallel: int | None = None
     accum_steps: int | None = None
     seq_length: int | None = None
     save_milestone_freq: int = 0
@@ -60,7 +67,6 @@ class OrchestratorOptions:
     require_dataset_fingerprint: bool = True
     python_executable: str | None = None
     repo_root: Path | None = None
-
 
 
 def stage_steps(stage: StageSpec, budget: BudgetSpec) -> int:
@@ -73,8 +79,9 @@ def stage_steps(stage: StageSpec, budget: BudgetSpec) -> int:
     raise ValueError(f"Unknown stage kind={stage.kind} for {stage.stage_id}")
 
 
-
-def dataset_refs_for_stage(stage: StageSpec, opts: OrchestratorOptions) -> list[DatasetRef]:
+def dataset_refs_for_stage(
+    stage: StageSpec, opts: OrchestratorOptions
+) -> list[DatasetRef]:
     refs: list[DatasetRef] = []
     for dataset_id in stage.dataset_ids:
         if dataset_id == "dclm_filter_8k":
@@ -96,7 +103,6 @@ def dataset_refs_for_stage(stage: StageSpec, opts: OrchestratorOptions) -> list[
         else:
             refs.append(DatasetRef(dataset_id=dataset_id, path="", split="train"))
     return refs
-
 
 
 def _dataset_fingerprint_path(ref: DatasetRef) -> Path:
@@ -249,7 +255,9 @@ def build_train_command(
 ) -> list[str]:
     if opts.python_executable:
         if opts.repo_root is None:
-            raise ValueError("OrchestratorOptions.repo_root is required when python_executable is set.")
+            raise ValueError(
+                "OrchestratorOptions.repo_root is required when python_executable is set."
+            )
         cmd = [
             opts.python_executable,
             str((opts.repo_root / "ttt" / "train.py").resolve()),
@@ -302,6 +310,10 @@ def build_train_command(
         cmd.append(f"training.global_batch_size={opts.ext_global_batch_size}")
     elif opts.global_batch_size is not None:
         cmd.append(f"training.global_batch_size={opts.global_batch_size}")
+    if stage.kind == "ext" and opts.ext_n_state_parallel is not None:
+        cmd.append(f"training.n_state_parallel={opts.ext_n_state_parallel}")
+    elif opts.n_state_parallel is not None:
+        cmd.append(f"training.n_state_parallel={opts.n_state_parallel}")
     if opts.accum_steps is not None:
         cmd.append(f"training.accum_steps={opts.accum_steps}")
     if opts.seq_length is not None:
@@ -316,7 +328,9 @@ def build_train_command(
 
     if stage.required_profile_keys:
         # Use first required profile key as default profile path override.
-        profile_path = opts.profile_root / stage.required_profile_keys[0] / "model_profile.json"
+        profile_path = (
+            opts.profile_root / stage.required_profile_keys[0] / "model_profile.json"
+        )
         cmd.append(f"training.external_profile_path={profile_path}")
 
     if explicit_resume_checkpoint_path is not None:
@@ -324,12 +338,13 @@ def build_train_command(
             f"training.resume_checkpoint_path={explicit_resume_checkpoint_path.expanduser().resolve()}"
         )
     if explicit_resume_checkpoint_format:
-        cmd.append(f"training.resume_checkpoint_format={explicit_resume_checkpoint_format}")
+        cmd.append(
+            f"training.resume_checkpoint_format={explicit_resume_checkpoint_format}"
+        )
     for override in extra_overrides or []:
         cmd.append(override)
 
     return cmd
-
 
 
 def _checkpoint_for_stage(
@@ -344,7 +359,6 @@ def _checkpoint_for_stage(
         checkpoint_id=stage.stage_id,
         exp_name=run_id,
     )
-
 
 
 def run_stage(
@@ -421,7 +435,9 @@ def run_stage(
 
     write_stage_manifest(run_dir / "stage_manifest.json", stage, repo_root=repo_root)
     write_run_manifest(run_dir / "run_manifest.json", run_spec, repo_root=repo_root)
-    write_json(run_dir / "environment_manifest.json", environment_manifest(repo_root=repo_root))
+    write_json(
+        run_dir / "environment_manifest.json", environment_manifest(repo_root=repo_root)
+    )
     write_command_script(run_dir / "command.sh", command)
     append_jsonl(
         run_dir / "events.jsonl",
@@ -446,7 +462,9 @@ def run_stage(
             run_dir=str(run_dir),
             metrics_path=str(run_dir / "metrics.jsonl"),
             events_path=str(run_dir / "events.jsonl"),
-            checkpoint=CheckpointRef(checkpoint_id=stage.stage_id, exp_name=resolved_run_id),
+            checkpoint=CheckpointRef(
+                checkpoint_id=stage.stage_id, exp_name=resolved_run_id
+            ),
             wall_seconds=wall_seconds,
             gpu_hours=estimate_gpu_hours_from_wall(wall_seconds=wall_seconds),
             tokens_seen=0,
@@ -493,8 +511,13 @@ def run_stage(
     write_json(run_dir / "checkpoint_manifest.json", checkpoint_manifest)
 
     seq_len = opts.seq_length or 0
-    batch_size = opts.global_batch_size or 0
-    tokens_planned = estimate_tokens(seq_length=seq_len, global_batch_size=batch_size, total_steps=steps)
+    if stage.kind == "ext":
+        batch_size = opts.ext_global_batch_size or opts.global_batch_size or 0
+    else:
+        batch_size = opts.global_batch_size or 0
+    tokens_planned = estimate_tokens(
+        seq_length=seq_len, global_batch_size=batch_size, total_steps=steps
+    )
     observed_tokens = observed_tokens_from_runtime_artifacts(
         metrics_path=run_dir / "metrics.jsonl",
         events_path=run_dir / "events.jsonl",
@@ -543,7 +566,6 @@ def run_stage(
         },
     )
     return result
-
 
 
 def pretty_command(cmd: list[str]) -> str:
